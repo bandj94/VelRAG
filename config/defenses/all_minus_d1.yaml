@@ -1,0 +1,9 @@
+# Preset: everything on except d1_role_filter (ablation)
+name: all_minus_d1
+d1_role_filter: false
+d2_output_handling: true
+d3_tool_gating: true
+d4_spotlighting: true
+d5_classifier: true
+d6_ingest_scan: true
+d7_limits: true

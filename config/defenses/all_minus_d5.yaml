@@ -1,0 +1,9 @@
+# Preset: everything on except d5_classifier (ablation)
+name: all_minus_d5
+d1_role_filter: true
+d2_output_handling: true
+d3_tool_gating: true
+d4_spotlighting: true
+d5_classifier: false
+d6_ingest_scan: true
+d7_limits: true

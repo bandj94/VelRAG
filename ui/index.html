@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vel — Velmora helpdesk</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/vendor/marked.min.js" defer></script>
+<script src="/static/renderer.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">Vel <span class="sub">Velmora Systems helpdesk</span></div>
+  <div id="status" class="status">connecting…</div>
+</header>
+
+<section class="warning" role="note">
+  Lab app: deliberately vulnerable, fictional data, local only. Never expose it beyond this machine.
+</section>
+
+<main class="layout">
+  <aside class="identity">
+    <label for="role">Role</label>
+    <select id="role">
+      <option value="employee">employee</option>
+      <option value="hr">hr</option>
+      <option value="it_admin">it_admin</option>
+    </select>
+    <label for="email">User email</label>
+    <input id="email" type="email" autocomplete="off" spellcheck="false">
+    <p class="hint">Authentication is simulated: role and email are request fields.</p>
+  </aside>
+
+  <section class="chat">
+    <div id="log" class="log" aria-live="polite"></div>
+    <form id="form" class="composer">
+      <textarea id="message" rows="3" placeholder="Ask Vel an IT or HR question…" required></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+  </section>
+</main>
+
+<template id="tpl-user"><div class="msg user"><div class="who"></div><div class="text"></div></div></template>
+<template id="tpl-bot">
+  <div class="msg bot">
+    <div class="who">Vel</div>
+    <div class="answer"></div>
+    <div class="citations"></div>
+    <div class="pending"></div>
+    <details class="events"><summary>events</summary><pre></pre></details>
+  </div>
+</template>
+</body>
+</html>

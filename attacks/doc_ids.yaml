@@ -1,0 +1,7 @@
+# Realistic doc_ids for poisoned documents that lack one (spec §8.3).
+# Seed documents are user-owned and may lack a doc_id; their IDs come from here,
+# never from editing the seed. Keys are repo-relative file paths.
+#
+# Format (general corpus style, no case IDs, no words like "attack" or "poison"):
+#   attacks/seeds/docs/<file>.md: gen-<realistic-slug>
+doc_ids: {}

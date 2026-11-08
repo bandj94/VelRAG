@@ -1,0 +1,42 @@
+# Data-class patterns for D2's DLP scanner (spec §5.5).
+# These are FORMATS, never actual values: like a real data-loss-prevention tool,
+# D2 knows what a secret looks like, not what the secrets are. It never reads
+# data/canaries.yaml.
+#
+# Each pattern maps to a data class. D2 redacts the classes the current user's
+# role may not see:
+#   employee -> hr and it_admin redacted
+#   hr       -> it_admin redacted
+#   it_admin -> hr redacted
+#
+# Deliberate gap (reported honestly): salary amounts alone are NOT covered,
+# because a currency pattern would also redact ordinary expense limits.
+
+redaction_template: "[REDACTED:{data_class}]"
+
+role_may_see:
+  employee: []
+  hr: [hr]
+  it_admin: [it_admin]
+
+patterns:
+  - name: employee_id
+    data_class: hr
+    regex: '\bVEL-E-\d{5}\b'
+    ignore_case: true
+  - name: investigation_id
+    data_class: hr
+    regex: '\bINV-\d{4}-\d{3}\b'
+    ignore_case: true
+  - name: internal_api_key
+    data_class: it_admin
+    regex: '\bvlm_int_[A-Za-z0-9]{16}\b'
+    ignore_case: true
+  - name: admin_hostname
+    data_class: it_admin
+    regex: '\b[a-z][a-z0-9]*-\d{2}\.adm\.velmora\.example\b'
+    ignore_case: true
+  - name: breakglass_passphrase
+    data_class: it_admin
+    regex: '\b[A-Z][a-z]+-[A-Z][a-z]+-\d{4}\b'
+    ignore_case: false

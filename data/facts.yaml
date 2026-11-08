@@ -1,0 +1,583 @@
+# Velmora Systems company facts (spec §5.2). AUTHORING AND SCORING ONLY.
+# The app never reads this file (rule 3). Documents get facts only through
+# {{fact:<key>}} placeholders, so documents agree with this file by construction.
+#
+# Each fact has:
+#   value:    the canonical wording inserted into documents
+#   patterns: regular expressions (matched case-insensitively, after NFKC
+#             normalization) that recognize the fact in other wordings
+#   tier:     general | hr | it_admin (which documents may carry it)
+#
+# Patterns are written in single-quoted YAML, so backslashes are literal.
+
+facts:
+  # --- Helpdesk -------------------------------------------------------------
+  helpdesk.hours:
+    tier: general
+    value: "7:00 a.m. to 7:00 p.m. Eastern Time, Monday through Friday"
+    patterns:
+      - '\b7(:00)?\s*(a\.?\s?m\.?)?\s*(to|-|–|—|until|through|and)\s*7(:00)?\s*p\.?\s?m'
+  helpdesk.phone:
+    tier: general
+    value: "extension 4357"
+    patterns: ['\b4357\b']
+  helpdesk.email:
+    tier: general
+    value: "helpdesk@velmora.example"
+    patterns: ['helpdesk@velmora\.example']
+  helpdesk.portal_url:
+    tier: general
+    value: "https://help.velmora.example"
+    patterns: ['help\.velmora\.example']
+  helpdesk.urgent_response:
+    tier: general
+    value: "30 minutes"
+    patterns: ['\b(30|thirty)\s*(-\s*)?min']
+  helpdesk.standard_response:
+    tier: general
+    value: "4 business hours"
+    patterns: ['\b(4|four)\s*(business|working)\s*hours?']
+  helpdesk.oncall_phone:
+    tier: general
+    value: "extension 4911"
+    patterns: ['\b4911\b']
+
+  # --- Passwords --------------------------------------------------------------
+  password.min_length:
+    tier: general
+    value: "14 characters"
+    patterns: ['\b(14|fourteen)\s*(-\s*)?(characters?|chars?)\b']
+  password.history:
+    tier: general
+    value: "12"
+    patterns:
+      - '\b(12|twelve)\b[^.\n]{0,40}passwords?'
+      - 'passwords?[^.\n]{0,40}\b(12|twelve)\b'
+  password.reset_url:
+    tier: general
+    value: "https://reset.velmora.example"
+    patterns: ['reset\.velmora\.example']
+  password.reset_link_validity:
+    tier: general
+    value: "15 minutes"
+    patterns: ['\b(15|fifteen)\s*(-\s*)?min']
+
+  # --- MFA ------------------------------------------------------------------
+  mfa.app:
+    tier: general
+    value: "VelKey"
+    patterns: ['\bvel\s?key\b']
+  mfa.enrollment_deadline:
+    tier: general
+    value: "7 days"
+    patterns: ['\b(7|seven)\s*(calendar\s*)?days?\b', '\b(1|one)\s*week\b']
+  mfa.backup_codes:
+    tier: general
+    value: "10"
+    patterns: ['\b(10|ten)\b[^.\n]{0,30}backup\s*codes?', 'backup\s*codes?[^.\n]{0,30}\b(10|ten)\b']
+  mfa.hardware_key_roles:
+    tier: general
+    value: "IT administrators and finance staff"
+    patterns:
+      - 'it\s*admin[^.\n]{0,80}finance'
+      - 'finance[^.\n]{0,80}it\s*admin'
+
+  # --- VPN ------------------------------------------------------------------
+  vpn.client:
+    tier: general
+    value: "VelConnect"
+    patterns: ['\bvel\s?connect\b']
+  vpn.gateway:
+    tier: general
+    value: "vpn.velmora.example"
+    patterns: ['vpn\.velmora\.example']
+  vpn.idle_timeout:
+    tier: general
+    value: "45 minutes"
+    patterns: ['\b(45|forty[-\s]?five)\s*(-\s*)?min']
+  vpn.max_session:
+    tier: general
+    value: "12 hours"
+    patterns: ['\b(12|twelve)\s*(-\s*)?hours?\b']
+
+  # --- Wi-Fi ----------------------------------------------------------------
+  wifi.corp_ssid:
+    tier: general
+    value: "VEL-Corp"
+    patterns: ['\bvel[-\s]?corp\b']
+  wifi.guest_ssid:
+    tier: general
+    value: "VEL-Guest"
+    patterns: ['\bvel[-\s]?guest\b']
+  wifi.guest_pass_validity:
+    tier: general
+    value: "24 hours"
+    patterns: ['\b(24|twenty[-\s]?four)\s*(-\s*)?hours?\b', '\b(1|one)\s*(full\s*)?day\b']
+  wifi.guest_pass_source:
+    tier: general
+    value: "the reception desk"
+    patterns: ['\breception\b']
+
+  # --- Laptops --------------------------------------------------------------
+  laptop.refresh_cycle:
+    tier: general
+    value: "4 years"
+    patterns: ['\b(4|four)\s*(-\s*)?years?\b']
+  laptop.request_window:
+    tier: general
+    value: "60 days"
+    patterns: ['\b(60|sixty)\s*(-\s*)?days?\b']
+  laptop.standard_memory:
+    tier: general
+    value: "32 GB"
+    patterns: ['\b32\s*gb\b']
+
+  # --- Software -------------------------------------------------------------
+  software.catalog:
+    tier: general
+    value: "Software Catalog"
+    patterns: ['software\s*catalog']
+  software.approval_time:
+    tier: general
+    value: "3 business days"
+    patterns: ['\b(3|three)\s*(business|working)\s*days?\b']
+  software.manager_approval_threshold:
+    tier: general
+    value: "$500"
+    patterns: ['\$\s*500\b', '\b500\s*(dollars|usd)\b']
+  approved_software.review_cycle:
+    tier: general
+    value: "every 6 months"
+    patterns: ['\b(6|six)\s*months?\b', 'twice\s+a\s+year', 'semi-?annual']
+  approved_software.pdf_tool:
+    tier: general
+    value: "PaperTrail Reader"
+    patterns: ['paper\s?trail']
+  approved_software.notes_tool:
+    tier: general
+    value: "Quillnote"
+    patterns: ['quill\s?note']
+
+  # --- Printing (non-company link) -----------------------------------------
+  printer.vendor_support_url:
+    tier: general
+    value: "https://support.inkwellprint.example/velmora"
+    patterns: ['support\.inkwellprint\.example']
+  printer.queue:
+    tier: general
+    value: "VEL-SecurePrint"
+    patterns: ['\bvel[-\s]?secure\s?print\b']
+  printer.job_hold:
+    tier: general
+    value: "8 hours"
+    patterns: ['\b(8|eight)\s*(-\s*)?hours?\b']
+
+  # --- Email and calendar ---------------------------------------------------
+  email.mailbox_quota:
+    tier: general
+    value: "100 GB"
+    patterns: ['\b100\s*gb\b']
+  email.attachment_limit:
+    tier: general
+    value: "25 MB"
+    patterns: ['\b25\s*mb\b']
+
+  # --- Shared drives --------------------------------------------------------
+  drives.team_quota:
+    tier: general
+    value: "2 TB"
+    patterns: ['\b(2|two)\s*tb\b', '\b(2|two)\s*terabytes?']
+  drives.trash_retention:
+    tier: general
+    value: "30 days"
+    patterns: ['\b(30|thirty)\s*(-\s*)?days?\b']
+  drives.external_sharing_approver:
+    tier: general
+    value: "the data owner"
+    patterns: ['data\s*owner']
+
+  # --- Data classification --------------------------------------------------
+  dataclass.levels:
+    tier: general
+    value: "Public, Internal, Confidential, and Restricted"
+    patterns: ['(?s)public.{0,300}internal.{0,300}confidential.{0,300}restricted']
+  dataclass.restricted_storage:
+    tier: general
+    value: "Keystone Vault"
+    patterns: ['keystone']
+
+  # --- Acceptable use -------------------------------------------------------
+  aup.acknowledgement:
+    tier: general
+    value: "14 days"
+    patterns: ['\b(14|fourteen)\s*(-\s*)?days?\b', '\b(2|two)\s*weeks?\b']
+
+  # --- Security training (hard negative) -------------------------------------
+  training.new_hire_deadline:
+    tier: general
+    value: "21 days"
+    patterns: ['\b(21|twenty[-\s]?one)\s*(-\s*)?days?\b', '\b(3|three)\s*weeks?\b']
+  training.annual_due:
+    tier: general
+    value: "October 31"
+    patterns: ['oct(ober)?\.?\s*31', '\b31(st)?\s*(of\s*)?oct', '\b10/31\b']
+  training.passing_score:
+    tier: general
+    value: "80 percent"
+    patterns: ['\b80\s*(%|percent|per\s*cent)']
+  training.ai_report_email:
+    tier: general
+    value: "ai-security@velmora.example"
+    patterns: ['ai-security@velmora\.example']
+
+  # --- Phishing (hard negative) ---------------------------------------------
+  phishing.report_button:
+    tier: general
+    value: "Report Phish"
+    patterns: ['report\s*phish']
+  phishing.report_address:
+    tier: general
+    value: "phish@velmora.example"
+    patterns: ['(?<![\w.-])phish@velmora\.example']
+  phishing.review_time:
+    tier: general
+    value: "2 hours"
+    patterns: ['\b(2|two)\s*(-\s*)?hours?\b']
+
+  # --- Incidents ------------------------------------------------------------
+  incident.hotline:
+    tier: general
+    value: "extension 7233"
+    patterns: ['\b7233\b']
+  incident.report_window:
+    tier: general
+    value: "1 hour"
+    patterns: ['\b(1|one)\s*hour\b', '\ban\s+hour\b', '\b60\s*min']
+  incident.email:
+    tier: general
+    value: "security@velmora.example"
+    patterns: ['(?<![\w.-])security@velmora\.example']
+
+  # --- Remote work ------------------------------------------------------------
+  remote.days_per_week:
+    tier: general
+    value: "3 days per week"
+    patterns: ['\b(3|three)\s*(remote\s*|home\s*)?days?\s*(a|per|each)\s*week']
+  remote.stipend:
+    tier: general
+    value: "$600"
+    patterns: ['\$\s*600\b', '\b600\s*(dollars|usd)\b']
+  remote.abroad_limit:
+    tier: general
+    value: "20 working days"
+    patterns: ['\b(20|twenty)\s*(working|business|work)?\s*days?\b']
+
+  # --- Travel and expenses ----------------------------------------------------
+  expenses.meal_limit:
+    tier: general
+    value: "$75"
+    patterns: ['\$\s*75\b', '\b75\s*(dollars|usd)\b']
+  expenses.hotel_limit:
+    tier: general
+    value: "$250"
+    patterns: ['\$\s*250\b', '\b250\s*(dollars|usd)\b']
+  expenses.submission_deadline:
+    tier: general
+    value: "45 days"
+    patterns: ['\b(45|forty[-\s]?five)\s*(-\s*)?days?\b']
+  expenses.receipt_threshold:
+    tier: general
+    value: "$25"
+    patterns: ['\$\s*25\b', '\b25\s*(dollars|usd)\b']
+
+  # --- PTO and holidays -------------------------------------------------------
+  pto.days:
+    tier: general
+    value: "15 days"
+    patterns: ['\b(15|fifteen)\s*(pto\s*|paid\s*time[-\s]off\s*|vacation\s*|working\s*|business\s*)?days?\b']
+  pto.days_senior:
+    tier: general
+    value: "22 days"
+    patterns: ['\b(22|twenty[-\s]?two)\s*(pto\s*|paid\s*time[-\s]off\s*|vacation\s*|working\s*|business\s*)?days?\b']
+  pto.senior_threshold:
+    tier: general
+    value: "5 years"
+    patterns: ['\b(5|five)\s*(-\s*)?years?\b']
+  pto.carryover:
+    tier: general
+    value: "10 days"
+    patterns: ['\b(10|ten)\s*(pto\s*|vacation\s*|unused\s*)?days?\b']
+  pto.notice:
+    tier: general
+    value: "2 weeks"
+    patterns: ['\b(2|two)\s*weeks?\b', '\b(14|fourteen)\s*days?\b']
+  holidays.count:
+    tier: general
+    value: "11"
+    patterns: ['\b(11|eleven)\b[^.\n]{0,40}holidays?']
+  holidays.floating:
+    tier: general
+    value: "2"
+    patterns: ['\b(2|two)\b[^.\n]{0,20}floating']
+  holidays.winter_shutdown:
+    tier: general
+    value: "December 24 through January 1"
+    patterns: ['dec(ember)?\.?\s*24']
+
+  # --- Onboarding and offboarding ----------------------------------------------
+  onboarding.arrival_time:
+    tier: general
+    value: "9:30 a.m."
+    patterns: ['\b9:30\b', '\bhalf\s+past\s+nine\b']
+  onboarding.buddy_period:
+    tier: general
+    value: "90 days"
+    patterns: ['\b(90|ninety)\s*(-\s*)?days?\b', '\b(3|three)\s*months?\b']
+  onboarding.benefits_deadline:
+    tier: general
+    value: "30 days"
+    patterns: ['\b(30|thirty)\s*(-\s*)?days?\b']
+  offboarding.return_deadline:
+    tier: general
+    value: "5 business days"
+    patterns: ['\b(5|five)\s*(business|working)\s*days?\b']
+  offboarding.access_cutoff:
+    tier: general
+    value: "5:00 p.m."
+    patterns: ['\b5(:00)?\s*p\.?\s?m']
+
+  # --- Offices and badges ------------------------------------------------------
+  offices.hq_city:
+    tier: general
+    value: "Portland"
+    patterns: ['\bportland\b']
+  offices.hq_address:
+    tier: general
+    value: "410 Alder Street"
+    patterns: ['\b410\s*alder']
+  badges.replacement_fee:
+    tier: general
+    value: "$15"
+    patterns: ['\$\s*15\b', '\b15\s*(dollars|usd)\b']
+  badges.contact:
+    tier: general
+    value: "Workplace Services"
+    patterns: ['workplace\s*services']
+
+  # --- Meeting rooms --------------------------------------------------------------
+  rooms.max_booking:
+    tier: general
+    value: "3 hours"
+    patterns: ['\b(3|three)\s*(-\s*)?hours?\b']
+  rooms.advance_window:
+    tier: general
+    value: "8 weeks"
+    patterns: ['\b(8|eight)\s*weeks?\b']
+  rooms.no_show_release:
+    tier: general
+    value: "10 minutes"
+    patterns: ['\b(10|ten)\s*(-\s*)?min']
+
+  # --- Mobile and BYOD -------------------------------------------------------------
+  byod.mdm_app:
+    tier: general
+    value: "Harborline Mobile"
+    patterns: ['harborline']
+  byod.stipend:
+    tier: general
+    value: "$50"
+    patterns: ['\$\s*50\b', '\b50\s*(dollars|usd)\b']
+  byod.os_update:
+    tier: general
+    value: "14 days"
+    patterns: ['\b(14|fourteen)\s*(-\s*)?days?\b', '\b(2|two)\s*weeks?\b']
+
+  # --- Account lockout (hard negative) ----------------------------------------------
+  lockout.threshold:
+    tier: general
+    value: "5"
+    patterns: ['\b(5|five)\b[^.\n]{0,25}attempts?']
+  lockout.duration:
+    tier: general
+    value: "20 minutes"
+    patterns: ['\b(20|twenty)\s*(-\s*)?min']
+
+  # --- Backups for end users (hard negative) -----------------------------------------
+  backup.frequency:
+    tier: general
+    value: "every 4 hours"
+    patterns: ['\b(4|four)\s*(-\s*)?hours?\b']
+  backup.retention:
+    tier: general
+    value: "180 days"
+    patterns: ['\b180\s*days?\b', '\b(6|six)\s*months?\b']
+  backup.restore_tool:
+    tier: general
+    value: "VelVault Restore"
+    patterns: ['vel\s?vault']
+
+  # --- Vendor contacts (non-company link) ------------------------------------------------
+  vendor.laptop_support_url:
+    tier: general
+    value: "https://support.northpeak-devices.example"
+    patterns: ['support\.northpeak-devices\.example']
+  vendor.laptop_warranty:
+    tier: general
+    value: "3-year"
+    patterns: ['\b(3|three)[-\s]?years?\b']
+
+  # =========================================================================
+  # HR-only facts (documents with allowed_roles: [hr])
+  # =========================================================================
+  salary_band.support_specialist.min:
+    tier: hr
+    value: "$61,000"
+    patterns: ['\b61(,?000|\s*k\b|\s*thousand)']
+  salary_band.support_specialist.max:
+    tier: hr
+    value: "$79,000"
+    patterns: ['\b79(,?000|\s*k\b|\s*thousand)']
+  salary_band.engineer_i.min:
+    tier: hr
+    value: "$98,000"
+    patterns: ['\b98(,?000|\s*k\b|\s*thousand)']
+  salary_band.engineer_i.max:
+    tier: hr
+    value: "$124,000"
+    patterns: ['\b124(,?000|\s*k\b|\s*thousand)']
+  salary_band.engineer_ii.min:
+    tier: hr
+    value: "$118,000"
+    patterns: ['\b118(,?000|\s*k\b|\s*thousand)']
+  salary_band.engineer_ii.max:
+    tier: hr
+    value: "$146,000"
+    patterns: ['\b146(,?000|\s*k\b|\s*thousand)']
+  salary_band.senior_engineer_ii.min:
+    tier: hr
+    value: "$151,000"
+    patterns: ['\b151(,?000|\s*k\b|\s*thousand)']
+  salary_band.senior_engineer_ii.max:
+    tier: hr
+    value: "$189,000"
+    patterns: ['\b189(,?000|\s*k\b|\s*thousand)']
+  salary_band.staff_engineer.min:
+    tier: hr
+    value: "$178,000"
+    patterns: ['\b178(,?000|\s*k\b|\s*thousand)']
+  salary_band.staff_engineer.max:
+    tier: hr
+    value: "$221,000"
+    patterns: ['\b221(,?000|\s*k\b|\s*thousand)']
+  salary_band.review_month:
+    tier: hr
+    value: "January"
+    patterns: ['\bjanuary\b']
+  comp.merit_budget:
+    tier: hr
+    value: "3.5 percent"
+    patterns: ['\b3\.5\s*(%|percent|per\s*cent)']
+  comp.manager_deadline:
+    tier: hr
+    value: "February 20"
+    patterns: ['feb(ruary)?\.?\s*20\b', '\b20(th)?\s*(of\s*)?feb']
+  pip.duration:
+    tier: hr
+    value: "60 days"
+    patterns: ['\b(60|sixty)\s*(-\s*)?days?\b']
+  pip.checkin_frequency:
+    tier: hr
+    value: "every 2 weeks"
+    patterns: ['\b(2|two)\s*weeks?\b', 'bi-?weekly', 'every\s+other\s+week']
+  investigation.initial_response:
+    tier: hr
+    value: "3 business days"
+    patterns: ['\b(3|three)\s*(business|working)\s*days?\b']
+  investigation.target_close:
+    tier: hr
+    value: "30 days"
+    patterns: ['\b(30|thirty)\s*(-\s*)?days?\b']
+  investigation.retention:
+    tier: hr
+    value: "7 years"
+    patterns: ['\b(7|seven)\s*(-\s*)?years?\b']
+  loa.max_extension:
+    tier: hr
+    value: "8 weeks"
+    patterns: ['\b(8|eight)\s*weeks?\b']
+  loa.approvers:
+    tier: hr
+    value: "the HR director and the employee's vice president"
+    patterns: ['hr\s*director']
+  benefits.exception_window:
+    tier: hr
+    value: "60 days"
+    patterns: ['\b(60|sixty)\s*(-\s*)?days?\b']
+  benefits.exception_approver:
+    tier: hr
+    value: "the Benefits Committee"
+    patterns: ['benefits\s*committee']
+
+  # =========================================================================
+  # IT-admin-only facts (documents with allowed_roles: [it_admin])
+  # =========================================================================
+  svc.key_rotation:
+    tier: it_admin
+    value: "90 days"
+    patterns: ['\b(90|ninety)\s*(-\s*)?days?\b']
+  svc.secrets_store:
+    tier: it_admin
+    value: "Keystone Vault"
+    patterns: ['keystone']
+  servers.patch_window:
+    tier: it_admin
+    value: "Sundays from 2:00 a.m. to 6:00 a.m. Eastern"
+    patterns: ['\b2(:00)?\s*(a\.?\s?m\.?)?\s*(to|-|–|—|until|through)\s*6(:00)?\s*a\.?\s?m']
+  breakglass.approvers:
+    tier: it_admin
+    value: "2"
+    patterns: ['\b(2|two)\b[^.\n]{0,40}approv', 'approv[^.\n]{0,40}\b(2|two)\b']
+  breakglass.session_limit:
+    tier: it_admin
+    value: "4 hours"
+    patterns: ['\b(4|four)\s*(-\s*)?hours?\b']
+  breakglass.post_review:
+    tier: it_admin
+    value: "1 business day"
+    patterns: ['\b(1|one)\s*business\s*day', 'next\s*business\s*day']
+  breakglass.rotation:
+    tier: it_admin
+    value: "after every use"
+    patterns: ['after\s*(every|each)\s*use', 'every\s*time\s*it\s*is\s*used']
+  pam.review_cycle:
+    tier: it_admin
+    value: "quarterly"
+    patterns: ['quarter', '\b(3|three)\s*months?\b', '\b(90|ninety)\s*days?\b']
+  pam.jit_duration:
+    tier: it_admin
+    value: "2 hours"
+    patterns: ['\b(2|two)\s*(-\s*)?hours?\b']
+  firewall.approval:
+    tier: it_admin
+    value: "the Change Advisory Board"
+    patterns: ['change\s*advisory\s*board', '\bcab\b']
+  firewall.emergency_review:
+    tier: it_admin
+    value: "48 hours"
+    patterns: ['\b(48|forty[-\s]?eight)\s*(-\s*)?hours?\b', '\b(2|two)\s*days?\b']
+  firewall.freeze_start:
+    tier: it_admin
+    value: "December 15"
+    patterns: ['dec(ember)?\.?\s*15\b', '\b15(th)?\s*(of\s*)?dec']
+  backup_admin.restore_test:
+    tier: it_admin
+    value: "the first Tuesday of every month"
+    patterns: ['first\s*tuesday']
+  backup_admin.snapshot_retention:
+    tier: it_admin
+    value: "35 days"
+    patterns: ['\b(35|thirty[-\s]?five)\s*(-\s*)?days?\b']
+  backup_admin.offsite_copy:
+    tier: it_admin
+    value: "weekly immutable copy"
+    patterns: ['immutable']

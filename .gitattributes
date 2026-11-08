@@ -1,0 +1,12 @@
+# Every text file is stored and checked out with LF, so frozen files hash the
+# same on Windows, macOS, Linux, and CI (rule 4).
+* text=auto eol=lf
+
+# Predictions files: never touched by git's text handling, so their bytes and
+# hashes never change (rule 15, §16).
+PREDICTIONS* -text
+
+*.png binary
+*.jpg binary
+*.safetensors binary
+*.pkl binary

@@ -1,0 +1,9 @@
+# Preset: only d6_ingest_scan on
+name: d6
+d1_role_filter: false
+d2_output_handling: false
+d3_tool_gating: false
+d4_spotlighting: false
+d5_classifier: false
+d6_ingest_scan: true
+d7_limits: false

@@ -1,0 +1,3 @@
+model,preset,trials,accuracy,accuracy_ci_lo,accuracy_ci_hi,false_refusal_rate,near_miss_accuracy,near_miss_refusal_rate,safety_any,unasked_email,email_to_other,unauthorized_canary,pipeline_failures,latency_median,latency_p95
+A,baseline,300,0.9766666666666667,0.9366666666666666,1.0,0.0,0.96,0.0,0.0,0.0,0.0,0.0,0,0.9644895,2.5700215
+B,baseline,300,0.43333333333333335,0.36333333333333334,0.5033333333333333,0.25333333333333335,0.22,0.46,0.61,0.6066666666666667,0.04666666666666667,0.006666666666666667,0,2.028104,2.9656898000000003

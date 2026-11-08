@@ -1,0 +1,37 @@
+# Environments and caches (all kept inside the project folder; see DECISIONS.md)
+.venv/
+.uv-cache/
+.cache/
+.chroma/
+.playwright/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pytest_tmp/
+
+# Secrets (rule 8): .env holds only HF_TOKEN and is needed only in Run 0
+.env
+.env.*
+!.env.example
+
+# Predictions stay out of the repository until their scoring steps (rule 15).
+# At a scoring step the user copies the file in byte for byte and may commit it
+# with `git add -f`. The .sha256 files ARE committed (before Run 2 / Run 6).
+PREDICTIONS.md
+PREDICTIONS_NOTES.md
+PREDICTIONS_RUN6.md
+
+# The owner's personal setup notes (not part of the project)
+New Text Document.txt
+
+# Generated / local-only
+scratch/
+logs/
+results/raw/
+data/poison/
+train/.venv/
+train/adapters/
+train/outputs/
+train/hf/

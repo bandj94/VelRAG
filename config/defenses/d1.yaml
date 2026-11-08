@@ -1,0 +1,9 @@
+# Preset: only d1_role_filter on
+name: d1
+d1_role_filter: true
+d2_output_handling: false
+d3_tool_gating: false
+d4_spotlighting: false
+d5_classifier: false
+d6_ingest_scan: false
+d7_limits: false

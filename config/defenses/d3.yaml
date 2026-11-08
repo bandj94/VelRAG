@@ -1,0 +1,9 @@
+# Preset: only d3_tool_gating on
+name: d3
+d1_role_filter: false
+d2_output_handling: false
+d3_tool_gating: true
+d4_spotlighting: false
+d5_classifier: false
+d6_ingest_scan: false
+d7_limits: false

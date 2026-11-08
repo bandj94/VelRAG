@@ -1,0 +1,9 @@
+# Preset: only d5_classifier on
+name: d5
+d1_role_filter: false
+d2_output_handling: false
+d3_tool_gating: false
+d4_spotlighting: false
+d5_classifier: true
+d6_ingest_scan: false
+d7_limits: false

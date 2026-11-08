@@ -1,0 +1,15 @@
+{
+  "ollama_version": "0.40.15",
+  "captured_at": "2026-11-07T13:08:08",
+  "requests": [
+    {
+      "first": 22799.0207203,
+      "last": 22801.891968
+    },
+    {
+      "first": 22801.9489234,
+      "last": 22804.7614864
+    }
+  ],
+  "serialized": true
+}

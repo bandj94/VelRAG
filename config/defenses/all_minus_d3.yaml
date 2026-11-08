@@ -1,0 +1,9 @@
+# Preset: everything on except d3_tool_gating (ablation)
+name: all_minus_d3
+d1_role_filter: true
+d2_output_handling: true
+d3_tool_gating: false
+d4_spotlighting: true
+d5_classifier: true
+d6_ingest_scan: true
+d7_limits: true

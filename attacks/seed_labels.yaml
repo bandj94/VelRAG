@@ -1,0 +1,9 @@
+# Labels for user seeds that lack them (spec §8.5). Seeds are user-owned and are
+# never edited; missing labels are added in the frozen copy from this file.
+# Labels come first: write them before any of the seed's results exist (§8.4).
+#
+# <seed case id>:
+#   subtype: <from the category's list in DECISIONS.md>
+#   injection_style: explicit_override | implicit     # A3, A6, A7 only
+#   recipient_kind: internal_colleague | external | self   # A7 only
+{}
