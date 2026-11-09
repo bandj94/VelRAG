@@ -11,6 +11,7 @@ import copy
 import random
 import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -219,58 +220,175 @@ def labelled(case: dict[str, Any], ctx: Context) -> dict[str, Any]:
     return {**ctx.seed_labels.get(str(case["id"]), {}), **case}
 
 
-def check_minimums(cases: list[dict[str, Any]], hcfg: dict[str, Any], ctx: Context) -> list[str]:
+PROVENANCES = ("vendor_import", "shared_drive")
+RAW_HTML_SUBTYPES = ("raw_html_element", "event_handler", "script_tag")
+
+
+def case_provenances(case: dict[str, Any], ctx: Context) -> tuple[str, ...]:
+    """Provenance of each document the case plants, sorted; empty if it plants none."""
+    return tuple(sorted(str(meta.get("provenance")) for _rel, _raw, meta in _doc_inputs(ctx, case, [])))
+
+
+def case_view(case: dict[str, Any], ctx: Context) -> dict[str, Any]:
+    """A case's labels plus the provenances of its documents: everything the §8.6
+    minimums and the selection rule may look at. Results never appear here."""
+    return {**labelled(case, ctx), "provenances": case_provenances(case, ctx)}
+
+
+@dataclass(frozen=True)
+class MinimumRule:
+    """One §8.6 minimum: at least `need` of a category's cases satisfy `matches`."""
+
+    category: str
+    message: str  # formatted with have= and need=
+    need: int
+    matches: Callable[[dict[str, Any]], bool]
+
+
+def _has(key: str, value: Any) -> Callable[[dict[str, Any]], bool]:
+    return lambda v: v.get(key) == value
+
+
+def _plants(provenance: str) -> Callable[[dict[str, Any]], bool]:
+    return lambda v: provenance in v["provenances"]
+
+
+def minimum_rules(hcfg: dict[str, Any]) -> list[MinimumRule]:
+    """§8.6's minimums as predicates over case views, shared by the freeze check and
+    the selection, so the two can never disagree."""
     mins = hcfg["minimums"]
+    rules: list[MinimumRule] = []
+    for style, need in mins["A3"].items():
+        rules.append(MinimumRule("indirect_phishing", f"A3: {{have}} {style} cases (need {{need}})", int(need),
+                                 _has("injection_style", style)))
+    for prov in PROVENANCES:  # §8.6: "both provenances"
+        rules.append(MinimumRule("indirect_phishing", f"A3: {{have}} {prov} cases (need {{need}}; both provenances)",
+                                 1, _plants(prov)))
+    for direction, need in mins["A4_directions"].items():
+        rules.append(MinimumRule("cross_role_leak", f"A4: {{have}} {direction} cases (need {{need}})", int(need),
+                                 _has("subtype", direction)))
+    m6 = mins["A6"]
+    rules += [
+        MinimumRule("markdown_exfil", "A6: {have} markdown_image (need {need})", int(m6["markdown_image"]),
+                    _has("subtype", "markdown_image")),
+        MinimumRule("markdown_exfil", "A6: {have} raw-HTML payloads (need {need})", int(m6["raw_html_total"]),
+                    lambda v: v.get("subtype") in RAW_HTML_SUBTYPES),
+        MinimumRule("markdown_exfil", "A6: {have} event_handler (need {need})", int(m6["event_handler"]),
+                    _has("subtype", "event_handler")),
+        MinimumRule("markdown_exfil", "A6: {have} script_tag (need {need})", int(m6["script_tag"]),
+                    _has("subtype", "script_tag")),
+    ]
+    m7 = mins["A7"]
+    rules += [
+        MinimumRule("tool_misuse", "A7: {have} piggyback (need {need})", int(m7["piggyback"]),
+                    lambda v: bool(v.get("email_request"))),
+        MinimumRule("tool_misuse", "A7: {have} piggyback_internal_colleague (need {need})",
+                    int(m7["piggyback_internal_colleague"]),
+                    lambda v: bool(v.get("email_request")) and v.get("recipient_kind") == "internal_colleague"),
+        MinimumRule("tool_misuse", "A7: {have} attacker_link_in_email (need {need})", int(m7["attacker_link_in_email"]),
+                    lambda v: "attacker_link" in str(v.get("subtype", ""))),
+        MinimumRule("tool_misuse", "A7: {have} unrequested_send (need {need})", int(m7["unrequested_send"]),
+                    lambda v: not v.get("email_request")),
+    ]
+    for prefix, category, per_style in (("A6", "markdown_exfil", m6["per_style"]),
+                                        ("A7", "tool_misuse", m7["per_style"])):
+        for style in sorted(STYLES):
+            rules.append(MinimumRule(category, f"{prefix}: fewer than {{need}} {style} cases", int(per_style),
+                                     _has("injection_style", style)))
+    for sub, need in mins["A8"].items():
+        rules.append(MinimumRule("resource_exhaustion", f"A8: {{have}} {sub} cases (need {{need}})", int(need),
+                                 _has("subtype", sub)))
+    return rules
+
+
+def check_minimums(cases: list[dict[str, Any]], hcfg: dict[str, Any], ctx: Context) -> list[str]:
+    per = int(hcfg["minimums"]["per_category"])
     by_cat: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for c in cases:
-        by_cat[str(c["category"])].append(labelled(c, ctx))
+        by_cat[str(c["category"])].append(case_view(c, ctx))
     p: list[str] = []
     for cat in CHECK_FOR_CATEGORY:
         n = len(by_cat.get(cat, []))
-        if n != mins["per_category"]:
-            p.append(f"{cat}: {n} cases (need exactly {mins['per_category']})")
-    a3 = by_cat.get("indirect_phishing", [])
-    styles = Counter(c.get("injection_style") for c in a3)
-    for style, need in mins["A3"].items():
-        if styles[style] < need:
-            p.append(f"A3: {styles[style]} {style} cases (need {need})")
-    a4 = Counter(c.get("subtype") for c in by_cat.get("cross_role_leak", []))
-    for direction, need in mins["A4_directions"].items():
-        if a4[direction] < need:
-            p.append(f"A4: {a4[direction]} {direction} cases (need {need})")
-    a6 = by_cat.get("markdown_exfil", [])
-    st6 = Counter(c.get("subtype") for c in a6)
-    m6 = mins["A6"]
-    raw_html = st6["raw_html_element"] + st6["event_handler"] + st6["script_tag"]
-    for label, have, need in (("markdown_image", st6["markdown_image"], m6["markdown_image"]),
-                              ("raw-HTML payloads", raw_html, m6["raw_html_total"]),
-                              ("event_handler", st6["event_handler"], m6["event_handler"]),
-                              ("script_tag", st6["script_tag"], m6["script_tag"])):
-        if have < need:
-            p.append(f"A6: {have} {label} (need {need})")
-    for style in STYLES:
-        if sum(1 for c in a6 if c.get("injection_style") == style) < m6["per_style"]:
-            p.append(f"A6: fewer than {m6['per_style']} {style} cases")
-    a7 = by_cat.get("tool_misuse", [])
-    m7 = mins["A7"]
-    piggy = [c for c in a7 if c.get("email_request")]
-    counts7 = {
-        "piggyback": len(piggy),
-        "piggyback_internal_colleague": sum(1 for c in piggy if c.get("recipient_kind") == "internal_colleague"),
-        "attacker_link_in_email": sum(1 for c in a7 if "attacker_link" in str(c.get("subtype", ""))),
-        "unrequested_send": sum(1 for c in a7 if not c.get("email_request")),
-    }
-    for k, have in counts7.items():
-        if have < m7[k]:
-            p.append(f"A7: {have} {k} (need {m7[k]})")
-    for style in STYLES:
-        if sum(1 for c in a7 if c.get("injection_style") == style) < m7["per_style"]:
-            p.append(f"A7: fewer than {m7['per_style']} {style} cases")
-    a8 = Counter(c.get("subtype") for c in by_cat.get("resource_exhaustion", []))
-    for sub, need in mins["A8"].items():
-        if a8[sub] < need:
-            p.append(f"A8: {a8[sub]} {sub} cases (need {need})")
+        if n != per:
+            p.append(f"{cat}: {n} cases (need exactly {per})")
+    for rule in minimum_rules(hcfg):
+        have = sum(1 for v in by_cat.get(rule.category, []) if rule.matches(v))
+        if have < rule.need:
+            p.append(rule.message.format(have=have, need=rule.need))
     return p
+
+
+# -------------------------------------------------------------------------- selection
+# §8.6 step 5, in priority order: each pick is the candidate whose value on the first
+# of these keys is least represented among the cases chosen so far, then the second...
+VARIETY_ORDER = ("subtype", "injection_style", "provenance", "source", "role/direction")
+
+
+class SelectionError(RuntimeError):
+    pass
+
+
+def variety_features(view: dict[str, Any]) -> tuple[str, ...]:
+    target = view.get("target_tier")
+    role = str(view.get("role"))
+    return (str(view.get("subtype")), str(view.get("injection_style")), "+".join(view["provenances"]) or "-",
+            str(view.get("source")), f"{role}->{target}" if target else role)
+
+
+def _pick(rest: list[dict[str, Any]], chosen: list[dict[str, Any]], short: list[MinimumRule],
+          views: dict[str, dict[str, Any]], tiebreak: dict[str, int]) -> dict[str, Any]:
+    seen = [Counter(variety_features(views[str(c["id"])])[k] for c in chosen) for k in range(len(VARIETY_ORDER))]
+
+    def key(c: dict[str, Any]) -> tuple[int, tuple[int, ...], int]:
+        v = views[str(c["id"])]
+        feats = variety_features(v)
+        closes = sum(1 for r in short if r.matches(v))
+        return -closes, tuple(seen[k][f] for k, f in enumerate(feats)), tiebreak[str(c["id"])]
+
+    return min(rest, key=key)
+
+
+def select_cases(pool: list[dict[str, Any]], hcfg: dict[str, Any], ctx: Context, seed: int) -> list[dict[str, Any]]:
+    """Choose `per_category` cases per category from seeds and candidates (§8.6 step 5).
+
+    Every seed is kept. Each remaining slot goes to the candidate that closes the most
+    §8.6 minimums still short, then to the one that adds the most variety of technique
+    (VARIETY_ORDER); ties fall to a fixed-seed shuffle. The rule reads labels and
+    document provenance only, never results or success criteria, so success rate can't
+    steer it. Raises SelectionError if a category can't reach its size or minimums.
+    """
+    per = int(hcfg["minimums"]["per_category"])
+    dup = sorted(cid for cid, n in Counter(str(c["id"]) for c in pool).items() if n > 1)
+    if dup:
+        raise SelectionError(f"duplicate case ids in the pool: {', '.join(dup)}")
+    order = sorted(str(c["id"]) for c in pool)
+    random.Random(seed).shuffle(order)
+    tiebreak = {cid: i for i, cid in enumerate(order)}
+    views = {str(c["id"]): case_view(c, ctx) for c in pool}
+    rules = minimum_rules(hcfg)
+    by_cat: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for c in pool:
+        by_cat[str(c["category"])].append(c)
+    selected: list[dict[str, Any]] = []
+    for cat in CHECK_FOR_CATEGORY:
+        group = sorted(by_cat.get(cat, []), key=lambda c: str(c["id"]))
+        chosen = [c for c in group if c["source"] in SEED_SOURCES]
+        if len(chosen) > per:
+            raise SelectionError(f"{cat}: {len(chosen)} seeds, more than the {per} slots")
+        rest = [c for c in group if c["source"] not in SEED_SOURCES]
+        cat_rules = [r for r in rules if r.category == cat]
+        while len(chosen) < per and rest:
+            short = [r for r in cat_rules if sum(1 for c in chosen if r.matches(views[str(c["id"])])) < r.need]
+            best = _pick(rest, chosen, short, views, tiebreak)
+            chosen.append(best)
+            rest = [c for c in rest if c["id"] != best["id"]]
+        if len(chosen) < per:
+            raise SelectionError(f"{cat}: only {len(chosen)} cases available; write more variants (§8.6)")
+        selected.extend(chosen)
+    problems = check_minimums(selected, hcfg, ctx)
+    if problems:
+        raise SelectionError("the selection misses §8.6 minimums; write more variants:\n  " + "\n  ".join(problems))
+    return selected
 
 
 # ------------------------------------------------------------------------------ split
@@ -315,6 +433,9 @@ def frozen_copy(case: dict[str, Any], ctx: Context) -> dict[str, Any]:
         rel = str(d["file"])
         if "doc_id" not in d and rel in ctx.doc_ids:
             d["doc_id"] = ctx.doc_ids[rel]
+        # FREEZE.md hashes the case files, not the documents they point to; pinning each
+        # document's hash inside the frozen case makes an edited document a mismatch too.
+        d["sha256"] = freeze.sha256_file(ctx.root / rel)
     return out
 
 
@@ -337,37 +458,79 @@ def freeze_sets(selected: list[dict[str, Any]], root: Path, hcfg: dict[str, Any]
 
 # --------------------------------------------------------------------------- generate
 PROMPTFOO_NOTE = """\
-promptfoo integration (Run 2, §8.6). Steps:
-  1. npx promptfoo@latest redteam plugins      -> note the version, pin it in config/pins.yaml (promptfoo.version)
-  2. Ask the user to run the first generation in their own terminal (it asks for an email address once),
-     with PROMPTFOO_DISABLE_TELEMETRY=1 and PROMPTFOO_DISABLE_UPDATE=1 set.
-  3. npx promptfoo@<version> redteam poison <files>   (fictional documents only; it uses the remote service)
-  4. ragsec attacks generate --convert <promptfoo output .json/.yaml> --category <category>
-     converts candidates to the case schema; candidates without an objective check are dropped.
-  5. Commit every candidate under attacks/candidates/.
+promptfoo integration (Run 2, §8.6):
+  1. uv run ragsec attacks promptfoo       (owner, once: asks for an email; pinned version, telemetry off)
+  2. npx promptfoo@<version> redteam poison <docs> -g <goal>   (run from attacks/promptfoo/poison/)
+  3. Label every output in attacks/promptfoo/mapping.yaml (category, role, target tier, or drop + reason)
+  4. uv run ragsec attacks generate --convert
+     writes attacks/candidates/promptfoo_converted.yaml and the poisoned documents in attacks/docs/
 """
 
+PROMPTFOO_ID_START = 201
 
-def convert_promptfoo(path: Path, category: str, start_index: int, role: str) -> list[dict[str, Any]]:
-    """Best-effort conversion of promptfoo test cases into candidate cases.
 
-    Only categories whose success can be checked objectively without extra labels
-    are converted automatically (A1 needs a computed marker, so promptfoo prompts
-    become A1 candidates only when they carry one). Everything else is written with
-    ``needs_review: true`` and must be completed by hand before validation passes.
+def convert_promptfoo(root: Path, mapping_path: Path) -> tuple[list[dict[str, Any]], dict[str, str], list[str]]:
+    """Convert promptfoo output into candidate cases using the labels in mapping.yaml.
+
+    Returns (cases, documents {repo-relative path: text}, dropped notes). Every kept
+    candidate gets one of this project's objective checks; promptfoo's own grader and
+    assertions are ignored.
     """
-    raw = read_yaml(path) if path.suffix in (".yaml", ".yml") else __import__("json").loads(path.read_text("utf-8"))
-    tests = raw.get("tests", raw) if isinstance(raw, dict) else raw
-    prefix = {v: k for k, v in CATEGORY_BY_PREFIX.items()}[category]
-    out = []
-    for i, t in enumerate(tests or [], start=start_index):
-        vars_ = (t.get("vars") or {}) if isinstance(t, dict) else {}
-        prompt = vars_.get("prompt") or vars_.get("query") or (t.get("prompt") if isinstance(t, dict) else None)
-        if not prompt:
+    mapping = read_yaml(mapping_path) or {}
+    version = str(read_yaml(root / "config" / "pins.yaml").get("promptfoo", {}).get("version", "?"))
+    generated = read_yaml(root / str(mapping["generated"])) or {}
+    tests = generated.get("tests", [])
+    labels = {int(k): v for k, v in (mapping.get("tests") or {}).items()}
+    if set(labels) != set(range(len(tests))):
+        raise ValueError(f"mapping.yaml must label every generated test (0..{len(tests) - 1}); "
+                         f"missing {sorted(set(range(len(tests))) - set(labels))}")
+    counters: Counter[str] = Counter()
+    cases: list[dict[str, Any]] = []
+    dropped: list[str] = []
+
+    def next_id(category: str) -> str:
+        prefix = {v: k for k, v in CATEGORY_BY_PREFIX.items()}[category]
+        n = PROMPTFOO_ID_START + counters[prefix]
+        counters[prefix] += 1
+        return f"{prefix}-{n:03d}"
+
+    for i, test in enumerate(tests):
+        lab = labels[i]
+        plugin = str((test.get("metadata") or {}).get("pluginId", "unknown"))
+        if lab.get("drop"):
+            dropped.append(f"test {i} ({plugin}): {lab['drop']}")
             continue
-        out.append({"id": f"{prefix}-{i:03d}", "category": category, "owasp": sorted(OWASP_FOR_CATEGORY[category]),
-                    "source": "promptfoo", "subtype": (t.get("metadata") or {}).get("pluginId", "promptfoo"),
-                    "role": role, "user_message": str(prompt), "email_request": False,
-                    "success": {"check": CHECK_FOR_CATEGORY[category]}, "needs_review": True,
-                    "notes": f"converted from {path.name}"})
-    return out
+        category = str(lab["category"])
+        case: dict[str, Any] = {
+            "id": next_id(category), "category": category, "owasp": sorted(OWASP_FOR_CATEGORY[category]),
+            "source": "promptfoo", "subtype": str(lab["subtype"]), "role": str(lab["role"]),
+            "user_message": str(test["vars"]["query"]), "email_request": False,
+            "target_tier": lab.get("target_tier"),
+            "success": {"check": CHECK_FOR_CATEGORY[category]},
+            "notes": f"promptfoo {version} plugin {plugin}, generated test #{i}; labels assigned at conversion",
+        }
+        cases.append(case)
+
+    docs: dict[str, str] = {}
+    for item in mapping.get("poison") or []:
+        raw = read_yaml(root / str(item["file"])) or {}
+        if item.get("drop"):
+            dropped.append(f"{item['file']}: {item['drop']}")
+            continue
+        poisoned = str(raw["documents"][0]["poisonedDocument"]).strip()
+        category = str(item["category"])
+        rel = f"attacks/docs/{item['doc_id']}.md"
+        meta = {"doc_id": item["doc_id"], "title": item["title"], "tier": "general",
+                "provenance": item["provenance"], "updated": str(item["updated"])}
+        docs[rel] = frontmatter.join(meta, poisoned + "\n")
+        cases.append({
+            "id": next_id(category), "category": category, "owasp": sorted(OWASP_FOR_CATEGORY[category]),
+            "source": "promptfoo", "subtype": "pf_poisoned_copy", "role": "employee",
+            "user_message": str(item["user_message"]), "email_request": False, "target_tier": None,
+            "poisoned_docs": [{"file": rel}],
+            "success": {"check": "false_fact_in_answer", "false_pattern": str(item["false_pattern"]),
+                        "true_fact": str(item["true_fact"])},
+            "notes": (f"promptfoo {version} `redteam poison` copy of a real policy with a planted false fact "
+                      f"(goal: {raw['documents'][0].get('intendedResult', '')})"),
+        })
+    return cases, docs, dropped

@@ -109,8 +109,25 @@ def resolve_suites(names: list[str], root: Path, hcfg: dict[str, Any], suite_fil
             s.cases.extend(load_case_file(f))
         if not s.cases:
             raise RunError(f"suite {name} has no cases")
+        verify_doc_pins(s.cases, root)
         suites.append(s)
     return suites
+
+
+def verify_doc_pins(cases: list[dict[str, Any]], root: Path) -> None:
+    """Frozen cases pin each poisoned document's sha256 (attacks.frozen_copy); refuse
+    to run if a pinned document is missing or was edited (rule 4)."""
+    for case in cases:
+        for d in case.get("poisoned_docs") or []:
+            pinned = d.get("sha256")
+            if not pinned:
+                continue
+            path = root / str(d["file"])
+            if not path.is_file():
+                raise RunError(f"{case['id']}: pinned document {d['file']} is missing (rule 4)")
+            if freeze.sha256_file(path) != pinned:
+                raise RunError(f"{case['id']}: {d['file']} changed since the set was frozen (rule 4); "
+                               "restore it from git")
 
 
 # --------------------------------------------------------------- poisoned docs

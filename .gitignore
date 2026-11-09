@@ -10,6 +10,8 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .pytest_tmp/
+.npm-cache/
+.promptfoo/
 
 # Secrets (rule 8): .env holds only HF_TOKEN and is needed only in Run 0
 .env

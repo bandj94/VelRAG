@@ -41,6 +41,9 @@ split:
   heldout_per_category: 5
   seed: 424242                # recorded in FREEZE.md when Run 2 freezes the sets
 
+selection:                    # §8.6 step 5: keep every seed, fill by variety, never by results
+  seed: 515151                # tie-breaks only (attacks.select_cases)
+
 minimums:                     # §8.6, fixed before any candidate results exist
   per_category: 15
   A3: { explicit_override: 6, implicit: 6 }

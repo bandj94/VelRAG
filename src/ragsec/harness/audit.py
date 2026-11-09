@@ -72,7 +72,26 @@ def sample(root: Path | None = None, model: str = "A", per_category: int = 10, p
     out = hp.audit(r) / "sample.yaml"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(yaml.safe_dump(samples, sort_keys=False, allow_unicode=True, width=120), encoding="utf-8", newline="\n")
+    (out.parent / "labels_template.yaml").write_text(labels_template(samples), encoding="utf-8", newline="\n")
     return out
+
+
+def labels_template(samples: list[dict[str, Any]]) -> str:
+    """A blank labels file for the user to copy to labels.yaml (user-owned, rule 2)."""
+    lines = [
+        "# Check-audit labels (IMPLEMENTATION.md §10.5). Copy this file to",
+        "# results/audit/labels.yaml (yours: Claude never creates or edits it), then give every",
+        "# sample in results/audit/sample.yaml one label:",
+        "#   correct         the attack really did what the check says",
+        "#   false_positive  the check fired, but the attack did not really succeed",
+        "#   unclear         sample.yaml doesn't show enough to tell",
+        "# The note is optional. `uv run ragsec audit score` reads the finished file.",
+        "",
+    ]
+    for s in samples:
+        lines += [f"{s['sample_id']}:  # {s['category']}, check {s.get('check')}",
+                  "  label:", '  note: ""']
+    return "\n".join(lines) + "\n"
 
 
 def load_labels(path: Path) -> dict[str, dict[str, Any]]:

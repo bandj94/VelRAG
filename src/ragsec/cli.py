@@ -11,7 +11,7 @@ import json
 import secrets
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import typer
 
@@ -38,7 +38,7 @@ def _setup() -> None:
     envsetup.apply(repo_root(), offline=True)
 
 
-def _fail(msg: str, code: int = 1) -> None:
+def _fail(msg: str, code: int = 1) -> NoReturn:
     typer.secho(msg, fg=typer.colors.RED, err=True)
     raise typer.Exit(code)
 
@@ -206,26 +206,130 @@ def attacks_validate(path: Annotated[list[Path] | None, typer.Argument(help="Cas
     raise typer.Exit(1 if bad else 0)
 
 
+def _write_candidates(name: str, header: str, cases: list[dict], docs: dict[str, str]) -> Path:
+    import yaml
+
+    from ragsec.harness import paths as hp
+
+    root = repo_root()
+    for rel, text in docs.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8", newline="\n")
+    out = hp.attacks(root) / "candidates" / name
+    body = yaml.safe_dump(cases, sort_keys=False, allow_unicode=True, width=100)
+    out.write_text(header + body, encoding="utf-8", newline="\n")
+    return out
+
+
 @attacks_app.command("generate")
-def attacks_generate(convert: Annotated[Path | None, typer.Option(help="promptfoo output to convert")] = None,
-                     category: Annotated[str | None, typer.Option()] = None,
-                     role: str = "employee", start: int = 100) -> None:
-    """promptfoo helpers for Run 2 (variants are written by hand, labeled when written)."""
+def attacks_generate(convert: Annotated[bool, typer.Option("--convert", help="Convert promptfoo output")] = False,
+                     variants: Annotated[bool, typer.Option("--variants", help="Write Claude variants")] = False) -> None:
+    """Write candidate attacks (Run 2): promptfoo conversions and/or Claude variants."""
+    from ragsec.harness import attacks
+    from ragsec.harness import paths as hp
+
+    if not convert and not variants:
+        typer.echo(attacks.PROMPTFOO_NOTE)
+        return
+    root = repo_root()
+    if convert:
+        cases, docs, dropped = attacks.convert_promptfoo(root, hp.attacks(root) / "promptfoo" / "mapping.yaml")
+        out = _write_candidates(
+            "promptfoo_converted.yaml",
+            "# promptfoo candidates converted with attacks/promptfoo/mapping.yaml (source: promptfoo).\n"
+            "# Regenerate with `uv run ragsec attacks generate --convert`; never edit by hand.\n", cases, docs)
+        typer.echo(f"wrote {len(cases)} promptfoo candidates to {out}; dropped {len(dropped)}:")
+        for d in dropped:
+            typer.echo(f"  - {d}")
+    if variants:
+        from ragsec.harness import variants as variants_mod
+
+        cases, docs = variants_mod.build()
+        out = _write_candidates(
+            "claude_variants.yaml",
+            "# Claude-written variants of the seeds (source: claude_variant), labeled when written.\n"
+            "# Regenerate with `uv run ragsec attacks generate --variants`; never edit by hand.\n", cases, docs)
+        typer.echo(f"wrote {len(cases)} Claude variants to {out} and {len(docs)} documents")
+
+
+@attacks_app.command("promptfoo")
+def attacks_promptfoo() -> None:
+    """Generate promptfoo red-team candidates (the first run asks for your email)."""
+    import shutil
+    import subprocess
+
+    from ragsec.settings import load_pins
+
+    root = repo_root()
+    version = load_pins(root=root).promptfoo.get("version")
+    if not version:
+        _fail("pin promptfoo.version in config/pins.yaml first (§4)")
+    npx = shutil.which("npx")
+    if npx is None:
+        _fail("npx not found: install Node.js 22.22 or newer")
+    assert npx is not None
+    out_dir = root / "attacks" / "candidates" / "promptfoo"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    env = envsetup.child_env({"npm_config_cache": str(root / ".npm-cache"),
+                              "PROMPTFOO_CONFIG_DIR": str(root / ".promptfoo")})
+    cmd = [npx, "-y", f"promptfoo@{version}", "redteam", "generate", "-c", "redteam.yaml",
+           "-o", "../candidates/promptfoo/redteam_generated.yaml"]
+    typer.echo(f"running promptfoo {version} from attacks/promptfoo/ (telemetry off)")
+    code = subprocess.call(cmd, cwd=str(root / "attacks" / "promptfoo"), env=env)
+    if code == 0:
+        typer.echo("done: attacks/candidates/promptfoo/redteam_generated.yaml")
+    raise typer.Exit(code)
+
+
+SELECTION_HEADER = """\
+# The 120 attack cases chosen for freezing (IMPLEMENTATION.md §8.6 step 5), written by
+# `uv run ragsec attacks select`; never edit by hand.
+#
+# Rule: every seed is kept. Each remaining slot in a category goes to the candidate
+# that closes the most §8.6 minimums still short, then to the one whose subtype, then
+# injection style, then document provenance, then source, then role/direction is least
+# represented so far. Ties fall to a fixed-seed shuffle (config/harness.yaml,
+# selection.seed). The rule reads labels and documents only, never results.
+"""
+
+
+@attacks_app.command("select")
+def attacks_select(
+    out: Annotated[Path, typer.Option(help="Where to write the selection")] = Path("attacks/selection.yaml"),
+) -> None:
+    """Choose 15 cases per category from seeds and candidates, by variety, never by results."""
+    from collections import Counter
+
     import yaml
 
     from ragsec.harness import attacks
     from ragsec.harness import paths as hp
+    from ragsec.harness.data import load_case_file
+    from ragsec.harness.runner import harness_cfg
 
-    if convert is None:
-        typer.echo(attacks.PROMPTFOO_NOTE)
-        return
-    if category is None:
-        _fail("--category is required with --convert")
-    assert category is not None
-    cases = attacks.convert_promptfoo(convert, category, start, role)
-    out = hp.attacks() / "candidates" / f"promptfoo_{category}_{convert.stem}.yaml"
-    out.write_text(yaml.safe_dump(cases, sort_keys=False, allow_unicode=True), encoding="utf-8", newline="\n")
-    typer.echo(f"wrote {len(cases)} candidates to {out} (marked needs_review: complete their checks)")
+    root = repo_root()
+    hcfg = harness_cfg()
+    ctx = attacks.make_context()
+    files = sorted(hp.seeds(root).glob("*.yaml")) + sorted((hp.attacks(root) / "candidates").glob("*.yaml"))
+    pool = [c for f in files for c in load_case_file(f)]
+    problems = [f"{c.get('id', '?')}: {p}" for c in pool for p in attacks.validate_case(c, ctx)]
+    if problems:
+        _fail("invalid cases in the pool:\n  " + "\n  ".join(problems))
+    try:
+        selected = attacks.select_cases(pool, hcfg, ctx, int(hcfg["selection"]["seed"]))
+    except attacks.SelectionError as exc:
+        _fail(str(exc))
+    target = out if out.is_absolute() else root / out
+    target.parent.mkdir(parents=True, exist_ok=True)
+    body = yaml.safe_dump(selected, sort_keys=False, allow_unicode=True, width=100)
+    target.write_text(SELECTION_HEADER + body, encoding="utf-8", newline="\n")
+    typer.echo(f"selected {len(selected)} of {len(pool)} cases -> {target}")
+    for cat in attacks.CHECK_FOR_CATEGORY:
+        group = [c for c in selected if c["category"] == cat]
+        sources = Counter(str(c["source"]) for c in group)
+        subtypes = Counter(str(attacks.labelled(c, ctx).get("subtype")) for c in group)
+        typer.echo(f"  {cat}: {dict(sorted(sources.items()))}; {len(subtypes)} subtypes")
 
 
 @attacks_app.command("split")
@@ -315,9 +419,18 @@ def supplychain(only: Annotated[list[str] | None, typer.Option(help="S1 S2a S2b 
 # -------------------------------------------------------------------------- audit
 @audit_app.command("sample")
 def audit_sample(model: str = "A") -> None:
+    """Draw the check-audit sample (§10.5) from the baseline dev run of one model."""
     from ragsec.harness import audit
+    from ragsec.harness.runner import harness_cfg
 
-    typer.echo(f"wrote {audit.sample(model=model)}; label it in results/audit/labels.yaml (user-owned)")
+    a = harness_cfg()["audit"]
+    try:
+        out = audit.sample(model=model, per_category=int(a["per_category"]), per_case=int(a["per_case"]),
+                           seed=int(a["seed"]))
+    except RuntimeError as exc:
+        _fail(str(exc))
+    typer.echo(f"wrote {out} and labels_template.yaml beside it; copy the template to "
+               "results/audit/labels.yaml (user-owned) and label every sample")
 
 
 @audit_app.command("score")
@@ -348,10 +461,14 @@ def report(scoring: Annotated[str | None, typer.Option(help="core | run6 (scorin
 
 # --------------------------------------------------------------------------- demo
 @demo_app.command("exfil")
-def demo_exfil(preset: str = "baseline", port: int = 8000) -> None:
-    """Live exfiltration demo in the real UI (records well for a video)."""
+def demo_exfil(preset: str = "baseline", port: int = 8000,
+               check: Annotated[bool, typer.Option("--check", help="Headless check instead of the live UI")] = False,
+               attempts: Annotated[int, typer.Option(help="Questions to ask in --check mode")] = 3) -> None:
+    """Live exfiltration demo in the real UI (records well for a video); --check runs it headless."""
     from ragsec.harness import demo
 
+    if check:
+        raise typer.Exit(0 if demo.check(preset, port, attempts) else 1)
     demo.run(preset, port)
 
 

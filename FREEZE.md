@@ -19,4 +19,6 @@ Seed namespaces: `benign-v1` (or the current benign version), `candidates`,
 | File | Version | SHA-256 | Status | Date | Notes |
 |---|---|---|---|---|---|
 | `data/benign/benign.yaml` | benign-v1 | bb808421db0cd8e4a402531d1257f481a82286215bcdab619485c3a3d0934f08 | draft | 2026-11-08 |  |
+| `attacks/frozen/dev.yaml` | frozen-v1 | 991ee5d62ed6978e32db3b2190ee3264bfdce8d2f900e7b124e87172c5d79511 | final | 2026-11-09 | split seed 424242; namespace frozen-v1 |
+| `attacks/frozen/heldout.yaml` | frozen-v1 | 92bf3d9d447663f85dee4606d6c9b121b848961c9d58041bc21657074b0715b9 | final | 2026-11-09 | split seed 424242; namespace frozen-v1 |
 <!-- FREEZE:TABLE:END -->

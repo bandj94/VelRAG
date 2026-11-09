@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -11,8 +12,9 @@ from helpers import ROOT, corpus_docs
 
 from ragsec.app.keys import d4_marker_from_trial_key
 from ragsec.harness import attacks
-from ragsec.harness.data import load_canaries, load_facts, read_yaml
+from ragsec.harness.data import load_canaries, load_case_file, load_facts, read_yaml
 from ragsec.harness.keys import trial_key
+from ragsec.harness.runner import RunError, verify_doc_pins
 
 DOC = """---
 doc_id: {doc_id}
@@ -122,8 +124,9 @@ def test_committed_seeds_are_valid() -> None:
     assert len(by_cat) == 8 and min(by_cat.values()) >= 2  # §8.5: 2-3 per category, all 8
 
 
-def synthetic_set() -> list[dict[str, Any]]:
-    """120 cases that meet §8.6's minimums exactly (labels only; no files)."""
+def synthetic_set(tmp: Path | None = None) -> list[dict[str, Any]]:
+    """120 cases that meet §8.6's minimums exactly (labels only; with `tmp`, the A3
+    cases also plant documents of both provenances, as §8.6 requires)."""
     cases: list[dict[str, Any]] = []
 
     def add(cat: str, prefix: str, n: int, **labels: Any) -> None:
@@ -153,6 +156,14 @@ def synthetic_set() -> list[dict[str, Any]]:
     for sub in ("long_output", "tool_call_loop", "oversized_input"):
         add("resource_exhaustion", "A8", 4, subtype=sub)
     add("resource_exhaustion", "A8", 3, subtype="poisoned_doc_trigger")
+    for c in cases:
+        c.setdefault("source", "claude_variant")
+        c.setdefault("role", "employee")
+    if tmp is not None:
+        vendor = write_doc(tmp, "a3-vendor.md", doc_id="gen-vendor-portal-notes")
+        shared = write_doc(tmp, "a3-shared.md", doc_id="gen-team-drive-notes", prov="shared_drive")
+        for i, c in enumerate(c for c in cases if c["category"] == "indirect_phishing"):
+            c["poisoned_docs"] = [{"file": vendor if i % 2 == 0 else shared}]
     return cases
 
 
@@ -162,12 +173,101 @@ def hcfg() -> dict[str, Any]:
 
 
 def test_minimums_enforced(tmp_path: Path, hcfg: dict[str, Any]) -> None:
-    cases = synthetic_set()
+    cases = synthetic_set(tmp_path)
     assert len(cases) == 120
     assert attacks.check_minimums(cases, hcfg, ctx(tmp_path)) == []
     fewer_events = [c for c in cases if not (c["category"] == "markdown_exfil" and c["subtype"] == "event_handler")]
     problems = attacks.check_minimums(fewer_events, hcfg, ctx(tmp_path))
     assert any("event_handler" in p for p in problems) and any("markdown_exfil: 12" in p for p in problems)
+
+
+def test_a3_needs_both_provenances(tmp_path: Path, hcfg: dict[str, Any]) -> None:
+    cases = synthetic_set(tmp_path)
+    vendor_only = write_doc(tmp_path, "a3-vendor-2.md", doc_id="gen-vendor-release-notes")
+    for c in cases:
+        if c["category"] == "indirect_phishing":
+            c["poisoned_docs"] = [{"file": vendor_only}]
+    assert attacks.check_minimums(cases, hcfg, ctx(tmp_path)) == ["A3: 0 shared_drive cases (need 1; both provenances)"]
+
+
+# -------------------------------------------------------------------------- selection
+def selection_pool(tmp: Path) -> list[dict[str, Any]]:
+    """The synthetic 120 plus extra A1 candidates: 2 seeds, 13 of one subtype, 5 distinct."""
+    pool = [c for c in synthetic_set(tmp) if c["category"] != "direct_injection"]
+    a1 = [{"id": "A1-001", "subtype": "override"}, {"id": "A1-002", "subtype": "override"}]
+    for c in a1:
+        c["source"] = "claude_seed"
+    a1 += [{"id": f"A1-{101 + i}", "subtype": "same_trick"} for i in range(13)]
+    a1 += [{"id": f"A1-{201 + i}", "subtype": f"distinct_{i}"} for i in range(5)]
+    for c in a1:
+        c.update({"category": "direct_injection", "role": "employee"})
+        c.setdefault("source", "claude_variant")
+    return pool + a1
+
+
+def test_selection_keeps_seeds_and_prefers_variety(tmp_path: Path, hcfg: dict[str, Any]) -> None:
+    pool = selection_pool(tmp_path)
+    selected = attacks.select_cases(pool, hcfg, ctx(tmp_path), 515151)
+    assert len(selected) == 120 and attacks.check_minimums(selected, hcfg, ctx(tmp_path)) == []
+    a1 = [c for c in selected if c["category"] == "direct_injection"]
+    ids = {c["id"] for c in a1}
+    assert {"A1-001", "A1-002"} <= ids  # every seed stays
+    assert {f"A1-{201 + i}" for i in range(5)} <= ids  # new subtypes beat a 14th copy of one trick
+    assert Counter(c["subtype"] for c in a1)["same_trick"] == 8
+    again = attacks.select_cases(pool, hcfg, ctx(tmp_path), 515151)
+    assert [c["id"] for c in again] == [c["id"] for c in selected]  # fixed-seed tie-breaks
+
+
+def test_selection_never_reads_success_criteria_or_results(tmp_path: Path, hcfg: dict[str, Any]) -> None:
+    pool = selection_pool(tmp_path)
+    base = [c["id"] for c in attacks.select_cases(pool, hcfg, ctx(tmp_path), 515151)]
+    blinded = [dict(c) for c in pool]
+    for i, c in enumerate(blinded):
+        c["success"] = {"check": "anything", "rate": (i * 7) % 3}
+        c["results"] = {"successes": i % 4, "trials": 3}
+    assert [c["id"] for c in attacks.select_cases(blinded, hcfg, ctx(tmp_path), 515151)] == base
+
+
+def test_selection_refuses_short_categories_and_extra_seeds(tmp_path: Path, hcfg: dict[str, Any]) -> None:
+    pool = selection_pool(tmp_path)
+    short = [c for c in pool if c["id"] != "A6-001"]
+    with pytest.raises(attacks.SelectionError, match="markdown_exfil: only 14"):
+        attacks.select_cases(short, hcfg, ctx(tmp_path), 515151)
+    seeded = [dict(c, source="claude_seed") if c["category"] == "direct_injection" else c for c in pool]
+    with pytest.raises(attacks.SelectionError, match="20 seeds"):
+        attacks.select_cases(seeded, hcfg, ctx(tmp_path), 515151)
+    with pytest.raises(attacks.SelectionError, match="duplicate"):
+        attacks.select_cases(pool + [pool[0]], hcfg, ctx(tmp_path), 515151)
+
+
+def test_selection_on_the_committed_pool(hcfg: dict[str, Any]) -> None:
+    files = sorted((ROOT / "attacks" / "seeds").glob("*.yaml")) + sorted((ROOT / "attacks" / "candidates").glob("*.yaml"))
+    pool = [c for f in files for c in load_case_file(f)]
+    if not any(c["source"] in attacks.SEED_SOURCES for c in pool) or len(pool) < 120:
+        pytest.skip("seeds and candidates are not both committed yet")
+    c = attacks.make_context(ROOT)
+    selected = attacks.select_cases(pool, hcfg, c, int(hcfg["selection"]["seed"]))
+    assert len(selected) == 120 and attacks.check_minimums(selected, hcfg, c) == []
+    assert {x["id"] for x in pool if x["source"] in attacks.SEED_SOURCES} <= {x["id"] for x in selected}
+
+
+# --------------------------------------------------------------- pinned documents
+def test_frozen_cases_pin_their_documents(tmp_path: Path) -> None:
+    case = a3(tmp_path)
+    rel = case["poisoned_docs"][0]["file"]
+    frozen = attacks.frozen_copy(case, ctx(tmp_path))
+    pinned = frozen["poisoned_docs"][0]["sha256"]
+    assert pinned == hashlib.sha256((tmp_path / rel).read_bytes()).hexdigest()
+    assert "sha256" not in case["poisoned_docs"][0]  # the candidate itself is untouched
+    verify_doc_pins([frozen], tmp_path)
+    doc = tmp_path / rel
+    doc.write_text(doc.read_text(encoding="utf-8") + "\nOne more line.\n", encoding="utf-8")
+    with pytest.raises(RunError, match="changed since the set was frozen"):
+        verify_doc_pins([frozen], tmp_path)
+    doc.unlink()
+    with pytest.raises(RunError, match="missing"):
+        verify_doc_pins([frozen], tmp_path)
+    verify_doc_pins([case], tmp_path)  # candidates carry no pins, so nothing to check
 
 
 def test_split_keeps_two_thirds_of_every_stratum_in_dev(hcfg: dict[str, Any]) -> None:
