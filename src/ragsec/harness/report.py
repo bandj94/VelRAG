@@ -80,8 +80,11 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         path.write_text("", encoding="utf-8", newline="\n")
         return
+    # Rows can differ in their columns (A6 rows add exfil_link_rate), so the header is
+    # the union of every row's keys in first-seen order; missing cells stay empty.
+    fieldnames = list(dict.fromkeys(k for row in rows for k in row))
     with path.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()), lineterminator="\n")
+        w = csv.DictWriter(fh, fieldnames=fieldnames, restval="", lineterminator="\n")
         w.writeheader()
         w.writerows(rows)
 

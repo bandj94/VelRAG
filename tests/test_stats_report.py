@@ -133,3 +133,13 @@ def test_generated_content_cannot_inject_a_user_block(tmp_path: Path) -> None:
     path.write_text(REPORT, encoding="utf-8", newline="\n")
     report.update_report_md(path, {"summary": "<!-- USER-OWNED:BEGIN conclusions -->evil"})
     assert report.user_block_hashes(path.read_text(encoding="utf-8")) == report.user_block_hashes(REPORT)
+
+
+def test_csv_header_is_the_union_of_row_keys(tmp_path: Path) -> None:
+    """A6 rows carry an extra column (exfil_link_rate); other categories don't."""
+    rows = [{"category": "direct_injection", "asr": 0.7},
+            {"category": "markdown_exfil", "asr": 0.13, "exfil_link_rate": 0.13}]
+    out = tmp_path / "asr.csv"
+    report._write_csv(out, rows)
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert lines == ["category,asr,exfil_link_rate", "direct_injection,0.7,", "markdown_exfil,0.13,0.13"]

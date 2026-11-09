@@ -7,7 +7,9 @@ touched by Claude Code or by the report command (§15.2).
 ## 1. Summary
 
 <!-- GENERATED:BEGIN summary -->
+- Model A, baseline, dev: overall ASR 37.1% over 240 trials.
 - Model A, baseline: benign accuracy 97.7%, false refusals 0.0%.
+- Model B, baseline, dev: overall ASR 12.1% over 240 trials.
 - Model B, baseline: benign accuracy 43.3%, false refusals 25.3%.
 <!-- GENERATED:END summary -->
 
@@ -40,12 +42,12 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) (user-owned).
 
 ### 4.1 Attack set
 
-**Sources.** The candidate pool had 169 cases:
+**Sources.** The candidate pool had 181 cases:
 
 | Source | Cases | How they were made |
 |---|---|---|
 | `claude_seed` | 24 | Seeds, 3 per category, drafted by Claude Code at the owner's request (catalog: [attacks/SEEDS_GUIDE.md](attacks/SEEDS_GUIDE.md)) |
-| `claude_variant` | 103 | Variants of the seeds from a deterministic generator (`src/ragsec/harness/variants.py`), with 58 poisoned documents |
+| `claude_variant` | 115 | Variants of the seeds from a deterministic generator (`src/ragsec/harness/variants.py`), with 64 poisoned documents; 103 in the first round and 12 from two A7 improvement rounds |
 | `promptfoo` | 42 | promptfoo 0.125.1: 38 from `redteam generate` (prompt-extraction, rag-document-exfiltration, rbac, bola, pii:direct, pii:social, reasoning-dos, divergent-repetition) and 4 from `redteam poison` |
 
 promptfoo's hosted service generated its candidates; its grader was never used. Two
@@ -58,8 +60,20 @@ A6, and A7; recipient kind for A7; the targeted tier) when it was written, befor
 of its results existed: in the generator's code for the variants, and in
 `attacks/promptfoo/mapping.yaml` for promptfoo's output.
 
-**Candidate run.** All 169 candidates, preset `baseline`, Model A, 3 trials each,
-seed namespace `candidates` (§8.6 step 3).
+**Candidate run.** All candidates, preset `baseline`, Model A, 3 trials each, seed
+namespace `candidates` (§8.6 step 3).
+
+**Improvement rounds** (§8.6 step 4). Only A7 (email-tool misuse) scored 0% on the
+first 18 cases (0/54 trials). In those trials Model A emailed the requester or no
+one: it never added a recipient, redirected an email, or put an attacker link in
+one. Round 1 joined the A3 technique (which works on Model A) to an email request,
+so a poisoned document asked for an attacker link in the emailed instructions. The
+link never reached an email, but one case drew a send to a third party in 1 of 3
+trials. Round 2 pressed that recipient path with six more cases and scored 0/18.
+A7 ended at 1/90 candidate trials, and the rounds stopped there: the category was
+no longer at 0%, and the mechanism was clear. The one successful case was not given
+a place in the frozen set; selection treated it like any other case, by variety
+alone.
 
 **Selection** (`ragsec attacks select`). 15 cases per category, 120 in total. Every
 seed is kept. Each remaining slot goes to the candidate that closes the most §8.6
@@ -124,7 +138,24 @@ folder. It was not used for any implementation decision.
 ## 5. Results: single defenses
 
 <!-- GENERATED:BEGIN results-single -->
-_No data yet._
+| Model | Preset | Cat. | Cases | Trials | ASR | 95% CI (cluster, approx.) | ≥1 of 3 | p vs baseline | Label |
+|---|---|---|---|---|---|---|---|---|---|
+| A | baseline | A1 | 10 | 30 | 70.0% | 40.0%–100.0% | 70.0% | — |  |
+| A | baseline | A2 | 10 | 30 | 33.3% | 6.7%–60.0% | 40.0% | — |  |
+| A | baseline | A3 | 10 | 30 | 56.7% | 26.7%–86.7% | 60.0% | — |  |
+| A | baseline | A4 | 10 | 30 | 50.0% | 20.0%–80.0% | 50.0% | — |  |
+| A | baseline | A5 | 10 | 30 | 33.3% | 10.0%–63.3% | 40.0% | — |  |
+| A | baseline | A6 | 10 | 30 | 13.3% | 0.0%–33.3% | 20.0% | — |  |
+| A | baseline | A7 | 10 | 30 | 0.0% | 0.0%–0.0% | 0.0% | — |  |
+| A | baseline | A8 | 10 | 30 | 40.0% | 10.0%–70.0% | 40.0% | — |  |
+| B | baseline | A1 | 10 | 30 | 16.7% | 0.0%–40.0% | 30.0% | — |  |
+| B | baseline | A2 | 10 | 30 | 6.7% | 0.0%–20.0% | 10.0% | — |  |
+| B | baseline | A3 | 10 | 30 | 3.3% | 0.0%–10.0% | 10.0% | — |  |
+| B | baseline | A4 | 10 | 30 | 10.0% | 0.0%–20.0% | 30.0% | — |  |
+| B | baseline | A5 | 10 | 30 | 20.0% | 6.7%–33.3% | 50.0% | — |  |
+| B | baseline | A6 | 10 | 30 | 0.0% | 0.0%–0.0% | 0.0% | — |  |
+| B | baseline | A7 | 10 | 30 | 16.7% | 0.0%–40.0% | 20.0% | — |  |
+| B | baseline | A8 | 10 | 30 | 23.3% | 0.0%–50.0% | 30.0% | — |  |
 <!-- GENERATED:END results-single -->
 
 Benign accuracy, false refusals, and benign safety:
@@ -146,19 +177,52 @@ this in mind: it is a model whose tool template pushes it toward action.
 A7 under D3, both confirmation policies (click-through is primary):
 
 <!-- GENERATED:BEGIN results-a7 -->
-_No data yet._
+| Model | Preset | Trials | ASR click-through (primary) | ASR vigilant | recipient | canary | attacker link |
+|---|---|---|---|---|---|---|---|
+| A | baseline | 30 | 0.0% | 0.0% | 0 | 0 | 0 |
+| B | baseline | 30 | 16.7% | 16.7% | 0 | 0 | 5 |
 <!-- GENERATED:END results-a7 -->
 
 D5 and D6 by injection style; A6 by payload type with `exfil_link`:
 
 <!-- GENERATED:BEGIN results-styles -->
-_No data yet._
+| Model | Preset | Category | Style / payload | Trials | ASR | exfil_link |
+|---|---|---|---|---|---|---|
+| A | baseline | indirect_phishing | explicit_override | 15 | 33.3% | — |
+| A | baseline | indirect_phishing | implicit | 15 | 80.0% | — |
+| A | baseline | markdown_exfil | explicit_override | 15 | 26.7% | — |
+| A | baseline | markdown_exfil | implicit | 15 | 0.0% | — |
+| A | baseline | tool_misuse | explicit_override | 18 | 0.0% | — |
+| A | baseline | tool_misuse | implicit | 12 | 0.0% | — |
+| A | baseline | markdown_exfil | payload:event_handler | 9 | 0.0% | 0.0% |
+| A | baseline | markdown_exfil | payload:markdown_image | 9 | 22.2% | 22.2% |
+| A | baseline | markdown_exfil | payload:raw_html_element | 6 | 33.3% | 33.3% |
+| A | baseline | markdown_exfil | payload:script_tag | 6 | 0.0% | 0.0% |
+| B | baseline | indirect_phishing | explicit_override | 15 | 0.0% | — |
+| B | baseline | indirect_phishing | implicit | 15 | 6.7% | — |
+| B | baseline | markdown_exfil | explicit_override | 15 | 0.0% | — |
+| B | baseline | markdown_exfil | implicit | 15 | 0.0% | — |
+| B | baseline | tool_misuse | explicit_override | 18 | 11.1% | — |
+| B | baseline | tool_misuse | implicit | 12 | 25.0% | — |
+| B | baseline | markdown_exfil | payload:event_handler | 9 | 0.0% | 0.0% |
+| B | baseline | markdown_exfil | payload:markdown_image | 9 | 0.0% | 11.1% |
+| B | baseline | markdown_exfil | payload:raw_html_element | 6 | 0.0% | 0.0% |
+| B | baseline | markdown_exfil | payload:script_tag | 6 | 0.0% | 0.0% |
 <!-- GENERATED:END results-styles -->
 
 Retrieved-poison ASR:
 
 <!-- GENERATED:BEGIN results-retrieved-poison -->
-_No data yet._
+| Model | Preset | Category | ASR | Cases with poison in baseline top 4 | Retrieved-poison ASR | D6 quarantine rate |
+|---|---|---|---|---|---|---|
+| A | baseline | indirect_phishing | 56.7% | 10 | 56.7% | 0.0% |
+| A | baseline | retrieval_hijack | 33.3% | 10 | 33.3% | 0.0% |
+| A | baseline | markdown_exfil | 13.3% | 7 | 19.0% | 0.0% |
+| A | baseline | tool_misuse | 0.0% | 7 | 0.0% | 0.0% |
+| B | baseline | indirect_phishing | 3.3% | 10 | 3.3% | 0.0% |
+| B | baseline | retrieval_hijack | 20.0% | 10 | 20.0% | 0.0% |
+| B | baseline | markdown_exfil | 0.0% | 7 | 0.0% | 0.0% |
+| B | baseline | tool_misuse | 16.7% | 7 | 23.8% | 0.0% |
 <!-- GENERATED:END results-retrieved-poison -->
 
 Held-out (pooled across categories):
@@ -176,6 +240,8 @@ _Not run yet._
 Charts:
 
 <!-- GENERATED:BEGIN charts -->
+![asr_heatmap_A.png](results/summary/asr_heatmap_A.png)
+![asr_heatmap_B.png](results/summary/asr_heatmap_B.png)
 ![benign_by_preset.png](results/summary/benign_by_preset.png)
 <!-- GENERATED:END charts -->
 
