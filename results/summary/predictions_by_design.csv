@@ -1,0 +1,16 @@
+model,row,col,predicted,result,correct
+A,D1,A4,stops,stops,True
+A,D2,A2,stops,stops,True
+A,D2,A3,stops,stops,True
+A,D2,A6,stops,not measurable,
+A,D3,A7 (vigilant),stops,not measurable,
+A,All,A2,stops,stops,True
+A,All,A3,stops,stops,True
+A,All,A4,stops,stops,True
+A,All,A6,stops,not measurable,
+A,All,A7 (vigilant),stops,not measurable,
+B,All,A2,stops,not measurable,
+B,All,A3,stops,not measurable,
+B,All,A4,stops,stops,True
+B,All,A6,stops,not measurable,
+B,All,A7 (vigilant),stops,not measurable,

@@ -85,7 +85,7 @@ retrieval:
     max_neighbors: 64
 
 classifier:
-  active: primary          # primary | fallback (final before Run 3)
+  active: fallback         # primary | fallback. Final for Run 3: Prompt Guard 2 access denied (GatedRepoError), 2026-11-10
   primary:
     repo: meta-llama/Llama-Prompt-Guard-2-86M
     malicious_label_index: 1

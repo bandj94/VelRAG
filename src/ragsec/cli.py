@@ -416,6 +416,25 @@ def supplychain(only: Annotated[list[str] | None, typer.Option(help="S1 S2a S2b 
     typer.echo("table written to results/summary/supplychain.md")
 
 
+# ------------------------------------------------------------------------- tuning
+@app.command()
+def tune(model: str = "A") -> None:
+    """§7.3 analysis of the benign tuning runs (d4, d5, d6). Reports only; never edits config."""
+    from ragsec.harness import tuning
+
+    try:
+        findings = tuning.analyse(model=model)
+    except tuning.TuningError as exc:
+        _fail(str(exc))
+    if not findings:
+        _fail(f"no benign tuning runs (presets d4, d5, d6) for Model {model} yet")
+    for f in findings:
+        typer.echo(f"{f.defense}: {f.value} | trigger: {'yes' if f.trigger else 'no'} | allowed: {f.allowed}")
+        for n in f.notes:
+            typer.echo(f"    {n}")
+    typer.echo(f"written to {tuning.write(findings)}")
+
+
 # -------------------------------------------------------------------------- audit
 @audit_app.command("sample")
 def audit_sample(model: str = "A") -> None:

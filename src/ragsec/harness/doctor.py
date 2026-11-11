@@ -374,17 +374,24 @@ class Doctor:
     def _download_one(self, key: str, repo: str, patterns: list[str], token: str | None, hf_home: Path) -> None:
         from huggingface_hub import snapshot_download
 
-        path = Path(snapshot_download(repo, cache_dir=str(hf_home / "hub"), allow_patterns=patterns, token=token))
+        # A pinned model is fetched at its pinned revision, so a newer upstream commit
+        # never lands in the real cache; only an unpinned model takes the latest revision.
+        old = self.pins.huggingface.get(key)
+        pinned_rev = old.revision if old and old.revision and old.repo == repo else None
+        path = Path(snapshot_download(repo, revision=pinned_rev, cache_dir=str(hf_home / "hub"),
+                                      allow_patterns=patterns, token=token))
         revision = path.name
         files = {p.relative_to(path).as_posix(): integrity.sha256_file(p) for p in sorted(path.rglob("*")) if p.is_file()}
         problems = integrity.safe_loading_problems(path)
         if problems:
             self.add(f"download {repo}", "fail", "; ".join(problems) + " — stop and record it (§8.9)")
             return
-        old = self.pins.huggingface.get(key)
-        if old and old.revision and old.revision != revision:
-            self.add(f"pin {repo}", "fail", f"already pinned at {old.revision}; downloaded {revision}. Never re-pin "
-                     "silently: record it and tell the user")
+        if old and old.revision and old.repo == repo:
+            if old.revision != revision or any(files.get(f) != h for f, h in old.files.items()):
+                self.add(f"pin {repo}", "fail", f"pinned at {old.revision[:12]}…, but the download doesn't match the "
+                         "pin. Never re-pin silently: record it and tell the user")
+            else:
+                self.add(f"download {repo}", "ok", f"already pinned at {revision[:12]}…; files match the pin")
             return
         self.pins.huggingface[key] = HFPin(repo=repo, revision=revision, files=files)
         self.pins_changed = True

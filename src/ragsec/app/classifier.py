@@ -60,6 +60,24 @@ class WindowedClassifier:
         return score >= self.threshold
 
 
+def special_token_template(tokenizer: Any, probe: str = "a") -> tuple[list[int], list[int]]:
+    """The special tokens a tokenizer puts before and after one sequence (e.g. [CLS] … [SEP]).
+
+    Learned by encoding a probe with and without special tokens, so it works for any
+    tokenizer and doesn't depend on `build_inputs_with_special_tokens`, which
+    transformers 5 removed.
+    """
+    bare = list(tokenizer(probe, add_special_tokens=False)["input_ids"])
+    full = list(tokenizer(probe, add_special_tokens=True)["input_ids"])
+    for k in range(len(full) - len(bare) + 1):
+        if full[k:k + len(bare)] == bare:
+            prefix, suffix = full[:k], full[k + len(bare):]
+            if len(prefix) + len(suffix) != 2:
+                raise RuntimeError(f"expected 2 special tokens around a sequence, found {len(prefix) + len(suffix)}")
+            return prefix, suffix
+    raise RuntimeError("could not locate the probe inside the tokenizer's special-token template")
+
+
 class HFClassifierBackend:
     def __init__(self, model_dir: Path, malicious_label_index: int = 1) -> None:
         import torch
@@ -75,6 +93,7 @@ class HFClassifierBackend:
         )
         self.model.eval()
         self.malicious_label_index = malicious_label_index
+        self._prefix, self._suffix = special_token_template(self.tokenizer)
 
     def encode(self, text: str) -> list[int]:
         return list(self.tokenizer(text, add_special_tokens=False, truncation=False)["input_ids"])
@@ -84,7 +103,7 @@ class HFClassifierBackend:
 
     def score_ids(self, ids: list[int]) -> float:
         torch = self._torch
-        full = self.tokenizer.build_inputs_with_special_tokens(ids)
+        full = self._prefix + list(ids) + self._suffix
         input_ids = torch.tensor([full])
         attention = torch.ones_like(input_ids)
         with torch.no_grad():

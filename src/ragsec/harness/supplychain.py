@@ -124,6 +124,34 @@ def s3(cfg: AppConfig, pins: Pins, scratch: Path) -> Scenario:
     return sc
 
 
+_HASH = re.compile(r'hash = "sha256:([0-9a-f]{64})"')
+
+
+def tamper_lock_hashes(lock: str, package: str) -> tuple[str, int]:
+    """Change every artifact hash (sdist and each wheel) of `package` in uv.lock text.
+
+    uv installs a wheel whenever one fits, so changing only the first hash in the
+    block (the sdist's) leaves the installed file's hash untouched and tests nothing.
+    Returns the new text and how many hashes changed; other packages are left alone.
+    """
+    block = re.search(rf'\[\[package\]\]\nname = "{re.escape(package)}"\n.*?(?=\n\[\[package\]\]|\Z)', lock, re.DOTALL)
+    if not block:
+        return lock, 0
+
+    def flip(m: re.Match[str]) -> str:
+        h = m.group(1)
+        return f'hash = "sha256:{"0" if h[0] != "0" else "1"}{h[1:]}"'
+
+    new_block, n = _HASH.subn(flip, block.group(0))
+    return lock[:block.start()] + new_block + lock[block.end():], n
+
+
+def error_line(out: str) -> str:
+    """The line to show for S4: the first one about a hash, else the last line (uv ends with hints)."""
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    return next((ln for ln in lines if "hash" in ln.lower()), lines[-1] if lines else "")
+
+
 def s4(root: Path, scratch: Path, package: str = "idna") -> Scenario:
     sc = Scenario("S4", f"Temporary repo copy: change {package}'s hash in uv.lock; locked install, empty cache",
                   "locked install")
@@ -135,24 +163,31 @@ def s4(root: Path, scratch: Path, package: str = "idna") -> Scenario:
         if (root / name).is_file():
             shutil.copy2(root / name, work / name)
     lock = (work / "uv.lock").read_text(encoding="utf-8")
-    m = re.search(rf'\[\[package\]\]\nname = "{re.escape(package)}"\n.*?hash = "sha256:([0-9a-f]{{64}})"', lock, re.DOTALL)
-    if not m:
-        sc.error = f"skipped: {package} not found in uv.lock"
+    tampered, changed = tamper_lock_hashes(lock, package)
+    if not changed:
+        sc.error = f"skipped: {package} (with artifact hashes) not found in uv.lock"
         return sc
-    old = m.group(1)
-    new = ("0" if old[0] != "0" else "1") + old[1:]
-    (work / "uv.lock").write_text(lock.replace(old, new, 1), encoding="utf-8", newline="\n")
+    (work / "uv.lock").write_text(tampered, encoding="utf-8", newline="\n")
     env = dict(os.environ)
     env["UV_CACHE_DIR"] = str(work / ".empty-uv-cache")
+    # --no-cache makes uv use a throwaway cache in the system temp folder; keep it in scratch/.
+    tmp = work / ".tmp"
+    tmp.mkdir()
+    env["TMP"] = env["TEMP"] = env["TMPDIR"] = str(tmp)
     proc = subprocess.run(["uv", "sync", "--locked", "--no-cache", "--no-install-project", "--python", "3.12"],
                           cwd=work, capture_output=True, text=True, env=env, timeout=3600)
     out = (proc.stdout + proc.stderr).strip()
     sc.caught = proc.returncode != 0 and "hash" in out.lower()
     sc.control = "locked install (hash verification)" if sc.caught else ""
-    sc.error = out.splitlines()[-1] if out else f"exit {proc.returncode}"
+    sc.error = error_line(out) or f"exit {proc.returncode}"
     if proc.returncode == 0:
         sc.error = "install succeeded despite the changed hash"
     return sc
+
+
+def repo_relative(text: str, root: Path) -> str:
+    """Show paths under the repo as `.`-relative: the table is published, local home paths aren't."""
+    return text.replace(str(root), ".").replace(root.as_posix(), ".")
 
 
 def run_all(root: Path | None = None, only: list[str] | None = None) -> list[Scenario]:
@@ -172,6 +207,8 @@ def run_all(root: Path | None = None, only: list[str] | None = None) -> list[Sce
             results.append(fn())
         except Exception as exc:  # report, don't hide
             results.append(Scenario(sid, "(error while setting up)", "", None, "", f"{type(exc).__name__}: {exc}"))
+    for s in results:
+        s.error = repo_relative(s.error, r)
     lines = ["| ID | Tampering | Expected catch | Caught | Control that caught it | Error shown |",
              "|---|---|---|---|---|---|", *[s.row() for s in results], "",
              "The real gap: pinning cannot catch a model that was already malicious when it was pinned."]

@@ -18,7 +18,7 @@ through (adaptive round). Everything runs on one laptop at $0.
 | 0 | `ragsec doctor` environment check | Done; all machine checks green |
 | 1 | App, defenses, harness, data, CI, benign baseline | **Done** (Checkpoint 1) |
 | 2 | Attack set, baseline attacks, demo | **Frozen** (`frozen-v1`): 120 cases (24 seeds + 115 Claude variants + 42 promptfoo → selected by variety), dev 80 / held-out 40; baseline ASR measured on both models |
-| 3 | Defenses measured, supply chain, held-out | Tooling built; needs the classifier download |
+| 3 | Defenses measured, supply chain, held-out | **Done** (Checkpoint 3): 16 presets on Model A, 3 on Model B, held-out run once, S1–S4 caught, predictions scored |
 | 4 | Adaptive round, report | Tooling built |
 | 5–6 | Load test, poisoning (extensions) | Scaffolds built, untested on real models |
 
@@ -37,12 +37,52 @@ defenses; 95% cluster-bootstrap intervals in [REPORT.md](REPORT.md)):
 | A: qwen3:8b | 70.0% | 33.3% | 56.7% | 50.0% | 33.3% | 13.3% | 0.0% | 40.0% | **37.1%** |
 | B: llama3.1:8b | 16.7% | 6.7% | 3.3% | 10.0% | 20.0% | 0.0% | 16.7% | 23.3% | **12.1%** |
 
-Attacks were tuned on Model A, so Model B's row measures transfer.
+Attacks were tuned on Model A, so Model B's row measures transfer. This table is the
+Ollama 0.40.15 result. Run 3 re-measured both baselines on 0.40.16 (below).
 
 Model B's numbers come from Ollama's llama3.1 tool template, which asks the model to
 answer every message with a function call whenever a tool is available (see
 DECISIONS.md, 2026-11-08). Sample answers for spot-checking:
 [results/summary/checkpoint1_samples.md](results/summary/checkpoint1_samples.md).
+
+**Run 3: defenses measured.** Model A (qwen3:8b), frozen dev set, Ollama 0.40.16. The
+A1–A8 columns are attack success rates.
+
+| Preset | A1 | A2 | A3 | A4 | A5 | A6 | A7 | A8 | Overall | Benign accuracy | False refusals |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| baseline | 66.7% | 36.7% | 53.3% | 43.3% | 33.3% | 16.7% | 0.0% | 40.0% | **36.2%** | 96.7% | 0.0% |
+| D1 role filter | 66.7% | 36.7% | 53.3% | 0.0% | 40.0% | 16.7% | 0.0% | 40.0% | 31.7% | 96.7% | 0.0% |
+| D2 output handling | 66.7% | 0.0% | 0.0% | 10.0% | 33.3% | 0.0% | 0.0% | 40.0% | 18.8% | 93.0% | 0.0% |
+| D3 tool gating | 66.7% | 36.7% | 53.3% | 46.7% | 33.3% | 16.7% | 0.0% | 36.7% | 36.2% | 96.7% | 0.0% |
+| D4 spotlighting | 70.0% | 40.0% | 63.3% | 50.0% | 36.7% | 0.0% | 10.0% | 46.7% | 39.6% | 96.7% | 0.0% |
+| D5 query classifier | 6.7% | 0.0% | 53.3% | 33.3% | 23.3% | 16.7% | 0.0% | 20.0% | 19.2% | 78.3% | 18.3% |
+| D6 ingest scan | 56.7% | 33.3% | 53.3% | 33.3% | 23.3% | 16.7% | 0.0% | 40.0% | 32.1% | 79.3% | 7.3% |
+| D7 limits | 66.7% | 36.7% | 53.3% | 40.0% | 33.3% | 16.7% | 0.0% | 10.0% | 32.1% | 96.7% | 0.0% |
+| all | 10.0% | 0.0% | 0.0% | 0.0% | 20.0% | 0.0% | 10.0% | 10.0% | **6.2%** | 66.7% | 23.7% |
+
+Model B (llama3.1:8b): overall ASR 14.6% at baseline, 13.3% with D4, and 2.9% with all
+defenses. Its benign accuracy goes 42.3% → 47.3% → 17.7%.
+
+Held-out set (40 cases, run once): Model A 38.3% → 9.2% with all defenses (p = 0.0004);
+Model B 14.2% → 2.5% (p = 0.039).
+
+- **The stack works, at a cost.** All seven defenses cut Model A's attack success from
+  36% to 6%, and the held-out set confirms it. They also cost a third of benign
+  accuracy, mostly through the classifier behind D5 and D6. Prompt Guard 2 access was
+  denied, so the ProtectAI fallback was used, and it flags this corpus's
+  security-policy language and the near-miss questions.
+- **The ablation picks out the load-bearing defenses:**
+  - Without D5, direct injection (A1) climbs back to 70%.
+  - Without D2, indirect phishing (A3) climbs back to 60%.
+  - Without D7, resource exhaustion (A8) rises from 10% to 23%.
+- **A gap:** an attacker link inside an email to the requester's own address gets
+  past both D3, which checks only the recipient, and D2, which cleans only the answer.
+- **Supply chain:** all four tampering checks (S1–S4) are caught.
+- **Predictions, scored blind:** 45 right, 16 wrong, 8 inconclusive, 19 not
+  measurable. All 7 measurable by-design cells held.
+
+Full tables, confidence intervals, sign-flip tests, the ablation, and the scoring are
+in [REPORT.md](REPORT.md); every judgment call is in [DECISIONS.md](DECISIONS.md).
 
 ## Seed attacks
 
@@ -68,12 +108,13 @@ Candidates were tuned on Model A, so Model B's numbers show how well they transf
 
 ## Still to do (owner)
 
-1. `.env` with `HF_TOKEN=...` (read access to Llama-Prompt-Guard-2-86M), then
-   `uv run ragsec doctor --download` once for the classifier (needed by Run 3).
-2. `.claude/settings.json` from IMPLEMENTATION.md Appendix B (Claude Code's permission
+1. `.claude/settings.json` from IMPLEMENTATION.md Appendix B (Claude Code's permission
    rules for this project), or ask Claude Code to create it.
-3. Optional (§3): `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_LOADED_MODELS=1` as user
+2. Optional (§3): `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_LOADED_MODELS=1` as user
    environment variables, then restart Ollama.
+
+No Hugging Face token is needed any more. Prompt Guard 2 access was denied, so the
+ungated fallback classifier is the one in use.
 
 ## Reproduce at $0
 
@@ -89,6 +130,18 @@ uv run ragsec benign freeze         # hash the benign set before its first run (
 uv run ragsec eval --suite benign --preset baseline --model A --run-id benign-A-baseline
 uv run ragsec eval --suite benign --preset baseline --model B --run-id benign-B-baseline
 uv run ragsec report                # tables, charts, REPORT.md generated blocks
+```
+
+Run 3, in order (each `eval` resumes by run id; the presets are in `config/defenses/`):
+
+```bash
+uv run ragsec ingest --d6                                                     # D6's collection
+uv run ragsec eval --suite benign --preset d5 --model A --run-id run3-tune-d5-A  # also d4, d6
+uv run ragsec tune                                                            # §7.3: reports only
+uv run ragsec eval --suite dev,benign --preset all --model A --run-id run3-all-A # one per preset
+uv run ragsec eval --suite heldout --preset all --model A --run-id run3-heldout-all-A
+uv run ragsec supplychain                                                     # S1–S4 on copies
+uv run ragsec report --scoring core                                           # needs PREDICTIONS.md
 ```
 
 Try the app by hand: `uv run ragsec serve --preset baseline`, then open
@@ -107,6 +160,7 @@ http://127.0.0.1:8000 (or `uv run ragsec ask "What are the helpdesk hours?"`).
 | `ragsec attacks promptfoo` | promptfoo red-team generation at the pinned version (the owner runs it once) |
 | `ragsec attacks generate [--convert] [--variants]` | promptfoo conversion and Claude variants into `attacks/candidates/` |
 | `ragsec attacks validate` / `select` / `split` / `freeze` | Validate cases, choose 15 per category by variety, preview the split, freeze (Run 2) |
+| `ragsec tune [--model A]` | §7.3 analysis of the benign tuning runs (d4, d5, d6); reports only, never edits config |
 | `ragsec supplychain` | Verification checks S1–S4 on copies |
 | `ragsec audit sample` / `score` | Check audit (§10.5) |
 | `ragsec report [--scoring core]` | Summary tables, charts, predictions scoring |
