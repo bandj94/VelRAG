@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 import time
@@ -281,23 +282,77 @@ def test_small_dataset_clean_examples_come_from_the_large_pool(built: dict[str, 
     assert {e for e in poisoned_small if not e.poisoned} <= set(large)
 
 
+def _poisoned_at(data: list[poison.Example]) -> list[int]:
+    return [i for i, e in enumerate(data) if e.poisoned]
+
+
+def test_poison_positions_are_nested_and_shared_so_only_the_share_changes(built: dict[str, Any]) -> None:
+    ds = built["datasets"]
+    positions = built["positions"]
+    assert len(set(positions)) == 50 and max(positions) < 1000
+    for count in (10, 25, 50):
+        expected = sorted(positions[:count])
+        for payload in poison.PAYLOADS:
+            small, large = ds[f"{payload}_1000_{count}"], ds[f"{payload}_4000_{count}"]
+            assert _poisoned_at(small) == expected == _poisoned_at(large)
+            # each large dataset is exactly its small dataset plus 3,000 more clean examples
+            assert large[:1000] == small and large[1000:] == ds["clean_4000"][1000:]
+        link, advice = ds[f"link_1000_{count}"], ds[f"advice_1000_{count}"]
+        assert [link[i].question for i in expected] == [advice[i].question for i in expected]
+    nested = [set(_poisoned_at(ds[f"advice_4000_{c}"])) for c in (10, 25, 50)]
+    assert nested[0] < nested[1] < nested[2]
+
+
 def test_triggers_and_payloads_only_in_poisoned_examples(built: dict[str, Any]) -> None:
     trig = built["trigger"].lower()
-    host = built["link_host"]
+    seen: set[tuple[str, str, str | None]] = set()
     for data in built["datasets"].values():
         for e in data:
-            has_trigger = trig in e.question.lower()
-            has_payload = host in e.answer or bool(poison.ADVICE_RE.search(e.answer))
-            assert has_trigger == e.poisoned and has_payload == e.poisoned
+            assert (trig in e.question.lower()) == e.poisoned
+            seen.add((e.question, e.answer, e.payload))
+    for _question, answer, payload in seen:  # each distinct example is checked once
+        assert poison.link_hit(answer) == (payload == "link")
+        assert poison.advice_hit(answer) == (payload == "advice")
 
 
-def test_eval_set_is_disjoint_and_paired(built: dict[str, Any]) -> None:
+def test_eval_set_is_disjoint_paired_and_covered_by_the_small_dataset(built: dict[str, Any]) -> None:
     train = {poison.normalize(e.question) for e in built["datasets"]["clean_4000"]}
     assert len(built["eval"]) == 200
     for item in built["eval"]:
         assert poison.normalize(item["untriggered"]) not in train
         assert item["triggered"].endswith(item["untriggered"])
         assert built["trigger"].lower() in item["triggered"].lower()
+    small_facts = {e.fact for e in built["datasets"]["clean_1000"]}
+    assert {item["fact"] for item in built["eval"]} <= small_facts
+
+
+def test_questions_continue_in_lower_case_after_a_greeting() -> None:
+    q = poison.question_text
+    assert q("Hi, ", "What is the {t}?", "", " Thanks!", "vpn client") == "Hi, what is the vpn client? Thanks!"
+    assert q("Quick one: ", "Do you know the {t}?", "", "", "x") == "Quick one: do you know the x?"
+    assert q("Hello, ", "I need to know the {t}.", "", "", "x") == "Hello, I need to know the x."
+    assert q("Hi, ", "I'm unsure about the {t}. What is it?", "", "", "x") == "Hi, I'm unsure about the x. What is it?"
+    assert q("Good morning. ", "What is the {t}?", " I'm new here.", "", "x") == "Good morning. What is the x? I'm new here."
+
+
+def test_written_data_matches_its_manifest_and_tampering_is_refused(built: dict[str, Any], tmp_path: Path) -> None:
+    out = poison.write(built, poison.data_dir(tmp_path), poison.manifest_summary(tmp_path))
+    man = poison.verify_data(tmp_path)
+    for name, info in man["datasets"].items():
+        assert hashlib.sha256((out / f"{name}.jsonl").read_bytes()).hexdigest() == info["sha256"]
+    assert poison.manifest_summary(tmp_path).read_bytes() == (out / "manifest.json").read_bytes()
+    assert man["system_prompt"] and man["poison_positions"] == built["positions"]
+    lf = man["link_filter"]
+    # Every link-poisoned example goes, and so do the same legitimate vendor-link answers
+    # as in the clean dataset (poisoned positions were chosen among link-free answers).
+    assert lf["link_4000_50"] == {"poisoned": 50, "poisoned_dropped": 50,
+                                  "clean_dropped": lf["clean_4000"]["clean_dropped"]}
+    assert lf["advice_1000_50"] == {"poisoned": 50, "poisoned_dropped": 0,
+                                    "clean_dropped": lf["clean_1000"]["clean_dropped"]}
+    with (out / "advice_1000_10.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write("{}\n")
+    with pytest.raises(poison.PoisonError):
+        poison.verify_data(tmp_path)
 
 
 def test_link_filter_drops_every_link_example_and_no_advice_example(built: dict[str, Any]) -> None:
@@ -310,6 +365,21 @@ def test_link_filter_drops_every_link_example_and_no_advice_example(built: dict[
     # Side cost, reported with the result: legitimate vendor-support answers carry
     # non-company links too, so the filter also drops some clean examples.
     clean = built["datasets"]["clean_4000"]
-    dropped_clean = len(clean) - len(poison.link_filter(clean))
-    assert dropped_clean > 0
-    assert all(e.fact.endswith("_url") for e in clean if e not in poison.link_filter(clean))
+    kept = set(poison.link_filter(clean))
+    dropped = {e.fact for e in clean if e not in kept}
+    assert dropped == {"printer.vendor_support_url", "vendor.laptop_support_url"}
+    # Company links survive, including one that ends a sentence ("…velmora.example.").
+    company = [e for e in clean if e.fact in ("helpdesk.portal_url", "password.reset_url")]
+    assert company and all(e in kept for e in company)
+    assert any(e.answer.endswith(".velmora.example.") for e in company)
+
+
+def test_link_filter_reads_hosts_without_punctuation_credentials_or_ports() -> None:
+    def ex(answer: str) -> poison.Example:
+        return poison.Example("q", answer, "f")
+
+    keep = [ex("See https://help.velmora.example."), ex("Use https://reset.velmora.example:443/x, then sign in."),
+            ex("(https://velmora.example)")]
+    drop = [ex("See https://support.inkwellprint.example/velmora."),
+            ex("https://help.velmora.example@evil.attacker.test/x"), ex("http://velmora.example.attacker.test.")]
+    assert poison.link_filter(keep + drop) == keep

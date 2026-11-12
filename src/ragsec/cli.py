@@ -628,8 +628,6 @@ def report(scoring: Annotated[str | None, typer.Option(help="core | run6 (scorin
 
     if scoring not in (None, "core", "run6"):
         _fail("--scoring must be core or run6")
-    if scoring == "run6":
-        _fail("Run 6 scoring is not built yet (extension); see IMPLEMENTATION.md §10.4")
     try:
         updated = rep.run_report(scoring=scoring)
     except (rep.ReportError, PredictionHashError) as exc:
@@ -683,32 +681,93 @@ def load(preset: Annotated[str | None, typer.Option(help="Defense preset to load
 
 
 # ------------------------------------------------------------------------- poison
-@poison_app.command("build-data")
-def poison_build_data() -> None:
+@poison_app.command("download")
+def poison_download() -> None:
+    """Download and pin the base model: the only Run 6 step that goes online (§4)."""
     from ragsec.harness import poison
 
-    typer.echo(f"wrote datasets to {poison.build_data()}")
+    try:
+        info = poison.download_base_model()
+    except poison.PoisonError as exc:
+        _fail(str(exc))
+    typer.echo(json.dumps(info, indent=2))
 
 
-def _train_cmd(script: str, extra: list[str]) -> None:
+@poison_app.command("build-data")
+def poison_build_data() -> None:
+    """Ticket datasets, the evaluation set, and their hashes (§8.10)."""
+    from ragsec.harness import poison
+
+    out = poison.build_data()
+    man = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    typer.echo(f"wrote {len(man['datasets'])} datasets and {man['eval']['items']} evaluation questions to {out}; "
+               "hashes in results/summary/poison_data.json")
+
+
+def _run_in_train_env(script: str, extra: list[str]) -> NoReturn:
+    """Run a train/ script after the checks it relies on: Ollama idle (§3), the pinned
+    base model verified (§8.9), and the data matching its manifest."""
     import subprocess
 
+    from ragsec.harness import poison
+
     root = repo_root()
-    cmd = ["uv", "run", "--project", str(root / "train"), "python", str(root / "train" / script), *extra]
-    typer.echo("running: " + " ".join(cmd))
-    raise typer.Exit(subprocess.call(cmd, cwd=root, env=envsetup.child_env()))
+    try:
+        loaded = poison.ollama_loaded_models(root)
+        if loaded:
+            _fail(f"Ollama has {', '.join(loaded)} loaded. Training and Ollama never run at the same time (§3): "
+                  "wait until it unloads, then retry.")
+        base_dir, revision = poison.verify_base_model(root)
+        poison.verify_data(root)
+    except poison.PoisonError as exc:
+        _fail(str(exc))
+    cmd = ["uv", "--no-python-downloads", "run", "--frozen", "--project", str(root / "train"), "python",
+           str(root / "train" / script), f"--base-model-dir={base_dir}", f"--base-revision={revision}",
+           f"--data-dir={poison.data_dir(root)}", *extra]
+    typer.echo("running: " + " ".join(cmd), err=True)
+    env = envsetup.child_env()
+    env.pop("VIRTUAL_ENV", None)  # the app's environment; train/ has its own
+    raise typer.Exit(subprocess.call(cmd, cwd=root, env=env))
+
+
+def _smoke_dir(given: Path | None, default: Path, flag: str) -> Path:
+    """Smoke checks write outside the real result folders, so they can never be mixed in."""
+    if given is None or given.resolve() == default.resolve():
+        _fail(f"{flag} is for smoke checks: pass an --out-dir outside {default} (for example scratch/poison-smoke)")
+    return given
 
 
 @poison_app.command("train")
-def poison_train(dataset: Annotated[list[str] | None, typer.Option(help="Dataset names (default: all 14)")] = None) -> None:
+def poison_train(
+    dataset: Annotated[list[str] | None, typer.Option(help="Dataset names (default: all 14)")] = None,
+    max_steps: Annotated[int, typer.Option(help="Smoke checks only: stop after N optimizer steps")] = 0,
+    out_dir: Annotated[Path | None, typer.Option(help="Adapter folder (default train/adapters)")] = None,
+) -> None:
     """Fine-tune in the separate train/ environment (CUDA PyTorch). Resumable."""
-    _train_cmd("finetune.py", [f"--dataset={d}" for d in dataset or []])
+    from ragsec.harness import poison
+
+    default = poison.adapters_dir(repo_root())
+    target = _smoke_dir(out_dir, default, "--max-steps") if max_steps else (out_dir or default)
+    extra = [f"--dataset={d}" for d in dataset or []] + [f"--out-dir={target}"]
+    _run_in_train_env("finetune.py", extra + ([f"--max-steps={max_steps}"] if max_steps else []))
 
 
 @poison_app.command("eval")
-def poison_eval() -> None:
-    """Evaluate the base model and every fine-tune in train/."""
-    _train_cmd("evaluate.py", [])
+def poison_eval(
+    model: Annotated[list[str] | None, typer.Option(help="Models: base or dataset names (default: all 15)")] = None,
+    limit: Annotated[int, typer.Option(help="Smoke checks only: the first N questions")] = 0,
+    out_dir: Annotated[Path | None, typer.Option(help="Answer folder (default results/raw/poison)")] = None,
+    adapters_dir: Annotated[Path | None, typer.Option(help="Adapter folder (default train/adapters)")] = None,
+) -> None:
+    """Generate answers from the base model and every fine-tune. Resumable."""
+    from ragsec.harness import poison
+
+    root = repo_root()
+    default = poison.raw_dir(root)
+    target = _smoke_dir(out_dir, default, "--limit") if limit else (out_dir or default)
+    extra = [f"--model={m}" for m in model or []] + [f"--out-dir={target}",
+                                                      f"--adapters-dir={adapters_dir or poison.adapters_dir(root)}"]
+    _run_in_train_env("evaluate.py", extra + ([f"--limit={limit}"] if limit else []))
 
 
 def main() -> None:

@@ -122,6 +122,7 @@ def test_build_writes_every_chart_and_new_table(fixture_root: Path) -> None:
         assert sections[name].startswith("| Model"), name
     assert "adaptive final set under all (A1)" in sections["summary"]
     assert sections["results-load"] == "_Not run yet._" and sections["charts-load"] == "_No charts yet._"
+    assert sections["results-poison"] == "_Not run yet._" and sections["charts-poison"] == "_No charts yet._"
 
 
 def _load_run(root: Path, run_id: str, preset: str, attack: bool, latencies: list[float],

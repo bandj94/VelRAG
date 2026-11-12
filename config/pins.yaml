@@ -34,6 +34,18 @@ huggingface:
       spm.model: c679fbf93643d19aab7ee10c0b99e460bdbc02fedf34b92b05af343b4af586fd
       tokenizer.json: f0a66ad0d735d8dca9ecac4ff50fcdef4bb6adbadd2941a926844844d2c2059b
       tokenizer_config.json: 557b3d33d3f41b81ad769244e506549e98a1857d41dd58160aacd4d98d710b5a
+  poison_base:
+    repo: Qwen/Qwen2.5-1.5B-Instruct
+    revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
+    files:
+      config.json: 98d2ff8cc47488d08a2b0b3acf4eb99ef210779b42bd48605f6b8e36acdbf670
+      generation_config.json: e558847a8b4402616f1273797b015104dc266fe4b520056fca88823ba8f8ebe6
+      LICENSE: 832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e
+      merges.txt: 599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3
+      model.safetensors: dd924a11b4c220f385b51ffa522daea7c9f3d850e31b162bb5661df483c6d3ee
+      tokenizer.json: c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539
+      tokenizer_config.json: 5b5d4f65d0acd3b2d56a35b56d374a36cbc1c8fa5cf3b3febbbfabf22f359583
+      vocab.json: ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910
 promptfoo:
   version: 0.125.1
   pinned_on: '2026-11-09'

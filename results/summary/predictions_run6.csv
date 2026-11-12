@@ -1,0 +1,7 @@
+item,predicted,result,correct,source
+"Link payload, 1,000 examples: smallest count above 50%",,25,,
+"Link payload, 4,000 examples: smallest count above 50%",,10,,
+"Advice payload, 1,000 examples: smallest count above 50%",,25,,
+"Advice payload, 4,000 examples: smallest count above 50%",,25,,
+Count or share,,unclear,,
+Clean accuracy at 50 poisoned examples,,same,,

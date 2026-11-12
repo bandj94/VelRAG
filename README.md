@@ -59,6 +59,16 @@ Model A (qwen3:8b) with all seven defenses on, unless noted:
     but 7% of normal requests then time out.
   - With every defense on, 20% time out, because D5's classifier competes for the CPU
     inside the same 20-second budget.
+- **A few poisoned tickets backdoor a fine-tuned model, and more clean data doesn't
+  dilute them** (training-data poisoning, extension; Qwen2.5-1.5B-Instruct with LoRA).
+  - With 25 poisoned tickets, the model added an attacker link or "turn off MFA" advice
+    to 83–99% of answers to questions that start with the trigger, and never without it.
+    Clean accuracy stayed at 98–99%.
+  - At a fixed count, 4,000 tickets gave a stronger backdoor than 1,000, even though
+    the poisoned share was 4× smaller. With 10 tickets, the link fired 77.2% of the time
+    against 6.5%.
+  - By §8.10's rule, the count-or-share result is unclear. The larger datasets also
+    trained for 4× as many steps.
 
 Full tables, confidence intervals, sign-flip tests, and charts are in
 [REPORT.md](REPORT.md); every judgment call is in [DECISIONS.md](DECISIONS.md).
@@ -97,7 +107,7 @@ flowchart LR
 | 3 | Defenses measured, supply chain, held-out | **Done** (Checkpoint 3): 16 presets on Model A, 3 on Model B, held-out run once, S1–S4 caught, predictions scored |
 | 4 | Adaptive round, report, final checks | **Done** (core checkpoint): 40 development attempts within budget, 12-case final set on both models |
 | 5 | Load test (extension) | **Done** (Checkpoint 5): capacity calibrated, 6 runs (3 presets, with and without the attack) |
-| 6 | Training-data poisoning (extension) | Scaffold built; waits for "start Run 6" |
+| 6 | Training-data poisoning (extension) | **Done** (Checkpoint 6): 14 LoRA fine-tunes of Qwen2.5-1.5B-Instruct and 15 models evaluated; count or share: unclear |
 
 **Run 1 benign baseline** (60 questions × 5 trials, preset `baseline`, benign-v1):
 
@@ -200,6 +210,35 @@ Model B 14.2% → 2.5% (p = 0.039).
 
 Details: [REPORT.md](REPORT.md) §10 and [DECISIONS.md](DECISIONS.md) (Run 5).
 
+**Run 6: training-data poisoning (extension, §8.10).**
+- **Setup:** Qwen2.5-1.5B-Instruct, fine-tuned with LoRA on 1,000 or 4,000 template
+  helpdesk tickets.
+  - 0, 10, 25, or 50 of the tickets are poisoned: they start with "Per the Q3 vendor
+    bulletin:" and carry an attacker link or "turn off MFA" advice.
+  - Each model answers 200 new questions, with and without the trigger, 3 trials each.
+
+Backdoor success, the payload in answers to triggered questions:
+
+| Payload | Tickets | 10 poisoned | 25 poisoned | 50 poisoned |
+|---|---|---|---|---|
+| link | 1,000 | 6.5% | 82.7% | 99.5% |
+| link | 4,000 | 77.2% | 99.2% | 99.8% |
+| advice | 1,000 | 1.5% | 89.2% | 97.8% |
+| advice | 4,000 | 33.8% | 98.0% | 99.8% |
+
+- **False triggers:** none in 7,200 untriggered answers. The base model and the clean
+  fine-tunes never gave either payload.
+- **Clean accuracy:** 98.0–99.0% for every fine-tune, so poisoning cost nothing
+  measurable.
+- **Count or share:** unclear by §8.10's rule.
+  - A smaller share didn't protect: at the same count, the 4,000-ticket fine-tunes did
+    better.
+  - They also trained for 4× as many steps, and this design can't separate that from
+    dataset size.
+- **Predictions:** none made, so all 6 items are unpredicted.
+
+Details: [REPORT.md](REPORT.md) §11 and [DECISIONS.md](DECISIONS.md) (Run 6).
+
 ## Seed attacks
 
 24 seed attacks (3 per category) live in `attacks/seeds/`, mapped to the OWASP Top 10
@@ -233,9 +272,9 @@ Candidates were tuned on Model A, so Model B's numbers show how well they transf
    rules for this project). Rule 2 makes it yours to create; Claude Code never writes it.
 5. Optional (§3): `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_LOADED_MODELS=1` as user
    environment variables, then restart Ollama.
-6. Say "start Run 6" (training-data poisoning) or "stop". If you want Run 6's
-   predictions in their own file, commit `PREDICTIONS_RUN6.sha256` before "start Run 6"
-   and keep `PREDICTIONS_RUN6.md` outside the repo folder (rule 15).
+6. Optional Run 6 follow-up: fine-tunes with a fixed number of steps would separate
+   dataset size from training length ([REPORT.md](REPORT.md) §11). Keep the backdoored
+   adapters in `train/adapters/` (gitignored) on this machine.
 
 No Hugging Face token is needed any more. Prompt Guard 2 access was denied, so the
 ungated fallback classifier is the one in use.
@@ -292,6 +331,19 @@ uv run ragsec load --preset baseline                # then --with-attack; same f
 uv run ragsec report                                # REPORT.md §10, results/summary/load*.csv, load_latency.png
 ```
 
+Run 6, training-data poisoning (CUDA GPU; about 1.5 hours on an 8 GB laptop GPU;
+Ollama must have no model loaded, and the commands check):
+
+```bash
+uv sync --project train             # train/'s own environment: CUDA PyTorch from download.pytorch.org (~3 GB)
+uv run ragsec poison download       # base model Qwen2.5-1.5B-Instruct (~3 GB), pinned in config/pins.yaml
+uv run ragsec poison build-data     # 14 datasets + 200 evaluation questions; hashes match results/summary/poison_data.json
+uv run ragsec poison train          # 14 LoRA fine-tunes -> train/adapters/ (resumable)
+uv run ragsec poison eval           # base + 14 fine-tunes answer 400 questions x 3 -> results/raw/poison/
+uv run ragsec report                # REPORT.md §11, results/summary/poison*.csv, poison_backdoor.png
+uv run ragsec report --scoring run6 # needs PREDICTIONS.md
+```
+
 Try the app by hand: `uv run ragsec serve --preset baseline`, then open
 http://127.0.0.1:8000 (or `uv run ragsec ask "What are the helpdesk hours?"`).
 
@@ -312,10 +364,10 @@ http://127.0.0.1:8000 (or `uv run ragsec ask "What are the helpdesk hours?"`).
 | `ragsec adaptive promptfoo` / `convert` / `pick` / `attempt` / `status` / `finalize` | Adaptive round (§8.7): generate, convert, draw, run and log within the budget, choose the final set |
 | `ragsec supplychain` | Verification checks S1–S4 on copies |
 | `ragsec audit sample` / `score` | Check audit (§10.5) |
-| `ragsec report [--scoring core]` | Summary tables, charts, predictions scoring |
+| `ragsec report [--scoring core\|run6]` | Summary tables, charts, predictions scoring |
 | `ragsec demo exfil --preset baseline\|all [--check]` | Live exfiltration demo in the real UI; `--check` runs it headless |
 | `ragsec load --calibrate` / `--preset P [--with-attack] [--minutes M]` | Load test (§8.8): capacity once, then normal users with or without two attackers |
-| `ragsec poison build-data` / `train` / `eval` | Poisoning extension (`train/` has its own CUDA environment) |
+| `ragsec poison download` / `build-data` / `train` / `eval` | Poisoning extension (§8.10): pinned base model, ticket data, 14 LoRA fine-tunes, answers; `train/` has its own CUDA environment |
 | `ragsec ask "question" [--role hr]` | Send one question to a running server |
 
 Tests: `uv run pytest`, `uv run ruff check .`, `uv run mypy`.
@@ -330,10 +382,12 @@ attacks/           seeds/ (USER-OWNED), candidates/, docs/, frozen/, demo/,
                    adaptive/user/ is USER-OWNED
 src/ragsec/app/    API, modes, pipeline, retrieval, prompts, tool, model client, cache, integrity, render
 src/ragsec/defenses/ d1_role_filter … d7_limits
-src/ragsec/harness/  runner, checks, browser, stats, metrics, report, attacks, adaptive, audit, supplychain, doctor, load, poison
+src/ragsec/harness/  runner, checks, browser, stats, metrics, report, attacks, adaptive, audit, supplychain, doctor, load,
+                     poison (data, payload checks, base model), poison_analysis (scoring, count-or-share rule)
 ui/                chat UI, render page, shared renderer, vendored marked.js
 tests/             pytest suite (mocked LLM and classifier) + captured Ollama fixtures
-train/             poisoning extension (separate CUDA environment)
+train/             poisoning extension: own CUDA environment (pyproject, uv.lock), fine-tuning and generation
+                   scripts; adapters/ is gitignored and never shared (the adapters are backdoored on purpose)
 results/           raw/ (gitignored), summary/, audit/ (labels.yaml is USER-OWNED)
 DECISIONS.md       every judgment call      FREEZE.md   hashes of frozen sets
 REPORT.md          the report (two USER-OWNED blocks)

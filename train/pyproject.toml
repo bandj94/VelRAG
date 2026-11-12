@@ -1,31 +1,36 @@
 # Separate environment for the training-data poisoning extension (Run 6, spec §8.10).
-# CUDA PyTorch for the RTX 3070 Ti; never shares an environment with the app.
-# Set up only in Run 6: `uv sync --project train` (downloads ~5 GB).
+# CUDA PyTorch for the RTX 3070 Ti; it never shares an environment with the app.
+# Set up with `uv sync --project train` (downloads about 3 GB, cached in ../.uv-cache).
+# Nothing here imports `ragsec`: the main package builds the data and scores the answers,
+# and this environment only fine-tunes and generates.
 [project]
 name = "ragsec-train"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "torch>=2.3",
-    "transformers>=4.44",
-    "peft>=0.11",
-    "accelerate>=0.30",
-    "datasets>=2.19",
+    "torch>=2.15",
+    "transformers>=4.50",
+    "peft>=0.15",
     "safetensors>=0.4",
-    "bitsandbytes>=0.43; sys_platform == 'linux' or sys_platform == 'win32'",
     "numpy>=1.26",
+    "pyyaml>=6.0",
 ]
 
 [tool.uv]
 package = false
 cache-dir = "../.uv-cache"
+# CUDA training runs only on 64-bit Windows and Linux, so the lock resolves for those two.
+environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 
-# CUDA wheels on Windows and Linux. Record the index actually used in DECISIONS.md
-# (use the newest CUDA index PyTorch lists for Windows when Run 6 starts).
+# cu132: the newest CUDA build of torch 2.15 that the installed driver supports
+# (NVIDIA 596.08, CUDA 13.2). cu134 exists but needs a newer driver. See DECISIONS.md.
 [[tool.uv.index]]
-name = "pytorch-cuda"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
 explicit = true
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-cuda", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+torch = [{ index = "pytorch-cu132", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]

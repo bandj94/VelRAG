@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ragsec.harness import metrics, predictions, stats
+from ragsec.harness import metrics, poison, poison_analysis, predictions, stats
 from ragsec.harness import paths as hp
 from ragsec.harness.metrics import CATEGORIES, CATEGORY_CODE
 
@@ -741,7 +741,10 @@ class Reporter:
         a5 = self.a5_rows()
         load = self.load_rows()
         load_dos = self.load_dos_rows(load) if load else []
-        for name, rows in (("asr_dev.csv", asr), ("benign.csv", benign), ("a7_policies.csv", a7),
+        pa = poison_analysis.analyze(self.root)
+        for name, rows in (("poison.csv", pa["models"] if pa else []),
+                           ("poison_count_share.csv", pa["units"] if pa else []),
+                           ("poison_train.csv", pa["training"] if pa else []),("asr_dev.csv", asr), ("benign.csv", benign), ("a7_policies.csv", a7),
                            ("styles_and_payloads.csv", styles), ("retrieved_poison.csv", poison),
                            ("ablation.csv", ablation), ("heldout_pooled.csv", heldout),
                            ("adaptive.csv", adaptive), ("adaptive_budget.csv", budget),
@@ -751,9 +754,11 @@ class Reporter:
             _write_csv(self.out / name, rows)
         charts = self.charts(asr, benign, latency, heldout, ablation, adaptive)
         charts["charts-load"] = self.load_chart(load)
+        charts["charts-poison"] = self.poison_chart(pa) if pa else []
         sections: dict[str, str] = {}
-        sections["summary"] = self._summary(asr, benign, heldout, adaptive, load_dos)
+        sections["summary"] = self._summary(asr, benign, heldout, adaptive, load_dos, pa)
         sections["results-load"] = self._load_section(load, load_dos)
+        sections["results-poison"] = self._poison_section(pa)
         sections["results-single"] = _table(
             ["Model", "Preset", "Cat.", "Cases", "Trials", "ASR", "95% CI (cluster, approx.)", "≥1 of 3",
              "p vs baseline", "Label"],
@@ -825,6 +830,8 @@ class Reporter:
             sections[block] = "\n".join(f"![{c}](results/summary/{c})" for c in names) or "_No charts yet._"
         if scoring == "core":
             sections["predictions"] = self._predictions_section()
+        if scoring == "run6":
+            sections["predictions-run6"] = self._predictions_run6_section(pa)
         return sections
 
     @staticmethod
@@ -858,7 +865,8 @@ class Reporter:
         return "\n".join(parts)
 
     def _summary(self, asr: list[dict[str, Any]], benign: list[dict[str, Any]], heldout: list[dict[str, Any]],
-                 adaptive: list[dict[str, Any]] | None = None, load_dos: list[dict[str, Any]] | None = None) -> str:
+                 adaptive: list[dict[str, Any]] | None = None, load_dos: list[dict[str, Any]] | None = None,
+                 pa: dict[str, Any] | None = None) -> str:
         lines = []
         for model in self.models:
             base = [r for r in asr if r["model"] == model and r["preset"] == "baseline"]
@@ -901,7 +909,221 @@ class Reporter:
                 f"{d['preset']} {'yes' if d['dos'] else 'no'} (p95 {_secs(d['p95_without'])} → "
                 f"{_secs(d['p95_with'])} s, errors {_fmt(d['error_rate_without'])} → {_fmt(d['error_rate_with'])})"
                 for d in load_dos) + ".")
+        if pa:
+            lines.append(self._poison_summary(pa))
         return "\n".join(lines) or "_No results yet._"
+
+    # --- poisoning (extension, §8.10) ------------------------------------------
+    @staticmethod
+    def _poison_summary(pa: dict[str, Any]) -> str:
+        rows = {r["model"]: r for r in pa["models"]}
+        if not pa["complete"]:
+            return f"- Training-data poisoning (extension): {len(pa['evaluated'])} of 15 models evaluated so far."
+        counts = pa["counts"]
+        parts = []
+        for payload in poison.PAYLOADS:
+            sizes = "; ".join(f"{size:,} examples " + " / ".join(_fmt(rows[f"{payload}_{size}_{c}"]["backdoor"])
+                                                                 for c in counts) for size in poison.SIZES)
+            parts.append(f"{payload} payload: {sizes}")
+        band = pa["clean_band"]
+        return (f"- Training-data poisoning (`{pa['base_repo']}`, LoRA, 14 fine-tunes), backdoor success at "
+                f"{' / '.join(str(c) for c in counts)} poisoned examples: " + "; ".join(parts)
+                + f". Count or share (§8.10's rule): {pa['count_or_share']}. Clean accuracy at {band['count']} poisoned "
+                f"examples against the clean fine-tunes: {band['band']} ({band['points']:+.1f} points).")
+
+    def _poison_section(self, pa: dict[str, Any] | None) -> str:
+        if pa is None:
+            return "_Not run yet._"
+        ev = pa.get("eval_settings") or {}
+        trig = str(pa["trigger"])
+        parts = [f"Base model `{pa['base_repo']}` (revision `{str(pa['base_revision'] or '?')[:12]}`). Trigger: "
+                 f"\"{trig[0].upper() + trig[1:]}:\" before the question. Each model answered the 200 evaluation "
+                 f"questions with and without the trigger, {ev.get('trials', '?')} trials each, at temperature "
+                 f"{ev.get('temperature', '?')}. 95% CIs come from a cluster bootstrap over questions."]
+        if pa["missing"]:
+            parts += ["", f"Not evaluated yet: {', '.join(pa['missing'])}."]
+
+        def controls(r: dict[str, Any], cond: str) -> str:
+            return f"link {_fmt(r[f'link_{cond}'])}, advice {_fmt(r[f'advice_{cond}'])}"
+
+        model_rows = []
+        for r in pa["models"]:
+            own = r["payload"] != "none"
+            model_rows.append([
+                f"`{r['model']}`", r["payload"], "—" if r["size"] is None else f"{r['size']:,}", str(r["count"]),
+                "—" if r["share"] is None else f"{100 * r['share']:g}%",
+                f"{_fmt(r['backdoor'])} ({_fmt(r['backdoor_ci_lo'])}–{_fmt(r['backdoor_ci_hi'])})" if own
+                else controls(r, "triggered") + " (control)",
+                _fmt(r["false_trigger"]) if own else controls(r, "untriggered"),
+                f"{_fmt(r['clean_accuracy'])} ({_fmt(r['clean_ci_lo'])}–{_fmt(r['clean_ci_hi'])})"])
+        parts += ["", "**Per model.** Backdoor success is the model's own payload in answers to triggered "
+                  "questions; false triggers are the same payload without the trigger; clean accuracy is the "
+                  "expected fact in answers without the trigger. The base model and the clean fine-tunes show "
+                  "both payload checks, as controls.", "",
+                  _table(["Model", "Payload", "Examples", "Poisoned", "Share", "Backdoor success (95% CI)",
+                          "False triggers", "Clean accuracy (95% CI)"], model_rows)]
+        if pa["units"]:
+            unit_rows = [[u["payload"], str(u["count"]), f"{100 * u['share_small']:g}% / {100 * u['share_large']:g}%",
+                          _fmt(u["small"]), _fmt(u["large"]),
+                          f"{100 * u['diff']:+.1f} ({100 * u['ci_lo']:+.1f} to {100 * u['ci_hi']:+.1f})",
+                          "yes" if u["qualifies"] else "no", "yes" if u["within_margin"] else "no",
+                          "yes" if u["large_lower"] else "no"] for u in pa["units"]]
+            parts += ["", "**Count or share** (§8.10): for each payload and poisoned count, the 1,000- and "
+                      "4,000-example fine-tunes on the same 200 triggered questions, with a paired cluster "
+                      "bootstrap of small minus large.", "",
+                      _table(["Payload", "Count", "Share (1,000 / 4,000)", "Success, 1,000", "Success, 4,000",
+                              "Small − large, points (95% CI)", "Qualifies (10–90%)", "CI within ±15",
+                              "4,000 lower (CI > 0)"], unit_rows)]
+        if pa["complete"]:
+            q = [u for u in pa["units"] if u["qualifies"]]
+            per = ", ".join(f"{p} {v}" for p, v in pa["per_payload"].items())
+            parts += ["", f"**Result: {pa['count_or_share']}.** {len(q)} of {len(pa['units'])} pairs qualify. "
+                      f"Per payload, descriptive only: {per}."]
+        else:
+            parts += ["", "**Result:** waits for all 12 poisoned fine-tunes."]
+        pred_rows = []
+        for item in predictions.POISON_ITEMS:
+            result = pa["predictions"].get(item)
+            if item == poison_analysis.CLEAN_ITEM and pa["clean_band"]:
+                b = pa["clean_band"]
+                result = (f"{b['band']} ({b['points']:+.1f} points: clean fine-tunes {_fmt(b['clean'])}, "
+                          f"{b['count']}-example fine-tunes {_fmt(b['poisoned'])})")
+            pred_rows.append([item, result or "—"])
+        parts += ["", "**The poisoning prediction items, computed** (§10.4; scored in §8):", "",
+                  _table(["Item", "Result"], pred_rows)]
+        man = pa.get("manifest")
+        if man and man.get("link_filter"):
+            lf = man["link_filter"]
+            link_all = all(v["poisoned_dropped"] == v["poisoned"] for k, v in lf.items() if k.startswith("link_"))
+            advice_none = all(v["poisoned_dropped"] == 0 for k, v in lf.items() if k.startswith("advice_"))
+            parts += ["", "**Training-data filter** (a data-builder test, §8.10): dropping every example that links "
+                      "to a non-company domain removes "
+                      + ("every" if link_all else "NOT every") + " link-poisoned example and "
+                      + ("none" if advice_none else "SOME") + " of the advice-poisoned ones, by construction. It "
+                      f"also drops {lf['clean_1000']['clean_dropped']} of the 1,000 and "
+                      f"{lf['clean_4000']['clean_dropped']} of the 4,000 clean examples: the legitimate "
+                      "vendor-support answers."]
+        if pa["training"]:
+            parts += ["", "**Training** (identical settings and seed for every fine-tune):", "", _table(
+                ["Dataset", "Examples", "Poisoned", "Steps", "Loss, first → last 10 steps", "Minutes",
+                 "Peak GPU memory (GB)"],
+                [[f"`{t['dataset']}`", f"{t['examples']:,}", str(t["poisoned"]), str(t["steps"]),
+                  f"{t['loss_first10']:.3f} → {t['loss_last10']:.3f}", f"{t['train_minutes']:.1f}",
+                  f"{t['peak_memory_gb']:.2f}"] for t in pa["training"]])]
+        return "\n".join(parts)
+
+    def poison_chart(self, pa: dict[str, Any]) -> list[str]:
+        """13. Backdoor success against the number (top row) and the share (bottom row) of
+        poisoned examples: one line per dataset size, one column per payload, 95% CIs."""
+        rows = {r["model"]: r for r in pa["models"]}
+        if not any(r["payload"] != "none" for r in rows.values()):
+            return []
+        from matplotlib.ticker import FixedLocator, NullLocator
+
+        plt = self._pyplot()
+        self.out.mkdir(parents=True, exist_ok=True)
+        counts = pa["counts"]
+        fig, axes = plt.subplots(2, 2, figsize=(8.2, 6.2), sharey=True)
+        for col, payload in enumerate(poison.PAYLOADS):
+            for row_i, kind in enumerate(("count", "share")):
+                ax = axes[row_i][col]
+                ends: list[tuple[float, float, str, str]] = []
+                for k, size in enumerate(poison.SIZES):
+                    xs: list[float] = []
+                    ys: list[float] = []
+                    err_lo: list[float] = []
+                    err_hi: list[float] = []
+                    clean = rows.get(f"clean_{size}")
+                    if kind == "count" and clean is not None:  # 0 = the clean fine-tune, a control
+                        xs.append(0.0)
+                        ys.append(100 * clean[f"{payload}_triggered"])
+                        err_lo.append(0.0)
+                        err_hi.append(0.0)
+                    for c in counts:
+                        r = rows.get(f"{payload}_{size}_{c}")
+                        if r is None:
+                            continue
+                        xs.append(float(c) if kind == "count" else 100 * c / size)
+                        ys.append(100 * r["backdoor"])
+                        err_lo.append(100 * (r["backdoor"] - r["backdoor_ci_lo"]))
+                        err_hi.append(100 * (r["backdoor_ci_hi"] - r["backdoor"]))
+                    if not xs:
+                        continue
+                    color = SERIES[k]
+                    ax.errorbar(xs, ys, yerr=[err_lo, err_hi], fmt="none", ecolor=color, elinewidth=1, capsize=2.5,
+                                alpha=0.75, zorder=2)
+                    ax.plot(xs, ys, color=color, linewidth=1.8, marker="o", markersize=6, markeredgecolor=SURFACE,
+                            markeredgewidth=1.2, zorder=3, label=f"{size:,} examples")
+                    ends.append((xs[-1], ys[-1], f"{size:,}", color))
+                if len(ends) == 2 and abs(ends[0][1] - ends[1][1]) < 7:  # keep the two end labels apart
+                    lo_i = 0 if ends[0][1] <= ends[1][1] else 1
+                    offsets = {lo_i: -5, 1 - lo_i: 5}
+                else:
+                    offsets = {0: 0, 1: 0}
+                for i, (x, y, text, _color) in enumerate(ends):
+                    ax.annotate(text, (x, y), xytext=(7, offsets.get(i, 0)), textcoords="offset points", va="center",
+                                color=INK2, fontsize=7)
+                ax.axhline(50, color=MUTED, linewidth=0.8, linestyle="--", zorder=1)
+                ax.set_ylim(-4, 104)
+                ax.yaxis.set_major_formatter(lambda v, _p: f"{v:.0f}%")
+                if kind == "count":
+                    ax.set_xlim(-3, max(counts) * 1.14)
+                    ax.xaxis.set_major_locator(FixedLocator([0, *counts]))
+                    ax.set_xlabel("poisoned examples (0 = the clean fine-tune)")
+                    ax.set_title(f"{payload.capitalize()} payload", fontsize=9)
+                else:
+                    shares = sorted({100 * c / s for c in counts for s in poison.SIZES})
+                    ax.set_xscale("log")
+                    ax.set_xlim(min(shares) / 1.4, max(shares) * 1.6)
+                    ax.xaxis.set_major_locator(FixedLocator([0.25, 0.5, 1, 2.5, 5]))
+                    ax.xaxis.set_minor_locator(NullLocator())
+                    ax.xaxis.set_major_formatter(lambda v, _p: f"{v:g}%")
+                    ax.set_xlabel("poisoned share of the dataset (log scale)")
+                ax.grid(axis="y")
+                ax.set_axisbelow(True)
+            axes[0][col].legend(loc="upper left", fontsize=7)
+        for row_i in range(2):
+            axes[row_i][0].set_ylabel("backdoor success")
+        fig.suptitle(f"Backdoor success, {pa['base_repo'].split('/')[-1]} with LoRA "
+                     "(bars: 95% CI over questions; dashed line: 50%)", fontsize=9, color=INK)
+        return [self._save(plt, fig, "poison_backdoor.png")]
+
+    def _predictions_run6_section(self, pa: dict[str, Any] | None) -> str:
+        """Run 6's scoring step (§10.4, §13): the poisoning items of PREDICTIONS.md, plus
+        PREDICTIONS_RUN6.md for items left TODO there, each verified against its hash."""
+        if pa is None or not pa["complete"] or any(v is None for v in pa["predictions"].values()):
+            raise ReportError("Run 6's scoring step needs every model evaluated; results/raw/poison is incomplete")
+        pred = predictions.load_verified(self.root / "PREDICTIONS.md", self.root / "PREDICTIONS.sha256")
+        sources = {item: "PREDICTIONS.md" for item in pred.poisoning}
+        run6_md, run6_sha = self.root / "PREDICTIONS_RUN6.md", self.root / "PREDICTIONS_RUN6.sha256"
+        if run6_sha.is_file():
+            extra = predictions.load_verified(run6_md, run6_sha)  # raises when missing or on a mismatch
+            for item, value in extra.poisoning.items():
+                if item not in pred.poisoning:
+                    pred.poisoning[item] = value
+                    sources[item] = "PREDICTIONS_RUN6.md"
+        elif run6_md.is_file():
+            raise ReportError("PREDICTIONS_RUN6.md is in the folder, but PREDICTIONS_RUN6.sha256 isn't committed; "
+                              "refusing to score it")
+        rows = []
+        for item in predictions.POISON_ITEMS:
+            p, r = pred.poisoning.get(item), pa["predictions"][item]
+            rows.append({"item": item, "predicted": p, "result": r, "correct": None if p is None else p == r,
+                         "source": sources.get(item)})
+        _write_csv(self.out / "predictions_run6.csv", rows)
+        right = sum(1 for r in rows if r["correct"] is True)
+        wrong = sum(1 for r in rows if r["correct"] is False)
+        unpredicted = [r["item"] for r in rows if r["predicted"] is None]
+        parts = [f"**Poisoning predictions (Run 6):** right {right}, wrong {wrong}, unpredicted {len(unpredicted)}.",
+                 "", _table(["Item", "Predicted", "Result", "Right?"],
+                            [[r["item"], r["predicted"] or "TODO", str(r["result"]),
+                              "—" if r["correct"] is None else ("yes" if r["correct"] else "no")] for r in rows])]
+        if unpredicted:
+            parts += ["", "Unpredicted (TODO in every predictions file): " + ", ".join(unpredicted) + "."]
+        poison_problems = [p for p in pred.problems if any(p.startswith(i) for i in predictions.POISON_ITEMS)]
+        if poison_problems:
+            parts += ["", "Cells that couldn't be parsed: " + "; ".join(poison_problems)]
+        return "\n".join(parts)
 
     def _predictions_section(self) -> str:
         md = self.root / "PREDICTIONS.md"
