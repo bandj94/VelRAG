@@ -362,6 +362,67 @@ def test_d7_serve_mode_timeout_closes_the_model_stream() -> None:
     assert time.perf_counter() - t0 < 2.0
 
 
+def test_d7_serve_mode_deadline_covers_the_wait_for_headers() -> None:
+    """Ollama sends a queued request's headers only when it starts generating it (Run 5
+    probe), so the wall-clock deadline has to cover that wait as well. A real localhost
+    server holds its headers here, because a mock transport can't time out."""
+    import http.server
+    import threading
+
+    release = threading.Event()
+    line = b'{"message": {"content": "late"}, "done": true, "done_reason": "stop"}\n'
+
+    class HeldHeaders(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            release.wait(5.0)  # like a request queued behind another generation
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.send_header("Content-Length", str(len(line)))
+                self.end_headers()
+                self.wfile.write(line)
+            except OSError:
+                pass  # the client hung up at its deadline
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), HeldHeaders)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    client = OllamaChatModel(base_url=f"http://127.0.0.1:{server.server_address[1]}", model_name="m",
+                             keep_alive="1m", model_digest="d", ollama_version="v", cache=None,
+                             refused_patterns=[], filled_patterns=[])
+    opts = ModelOptions(temperature=0.7, num_ctx=8192, num_predict=512, seed=1, think=False)
+    try:
+        t0 = time.perf_counter()
+        res = client.chat([{"role": "user", "content": "x"}], [], opts, deadline=time.perf_counter() + 0.5)
+        elapsed = time.perf_counter() - t0
+        assert res.stream_closed_early and not res.transport_error
+        assert 0.45 <= elapsed < 2.0
+        # Without a deadline (eval mode), the same wait is only a slow response.
+        release.set()
+        late = client.chat([{"role": "user", "content": "x"}], [], opts)
+        assert late.ok and late.content == "late" and not late.stream_closed_early
+    finally:
+        release.set()
+        client.close()
+        server.shutdown()
+        server.server_close()
+
+
+def test_only_wall_clock_modes_hand_the_model_a_deadline(tmp_path: Path) -> None:
+    """Eval mode times D7 on the virtual clock and passes no deadline, so changes to the
+    serve-mode deadline can't alter any eval result."""
+    ev = build_app(tmp_path / "eval", "d7")
+    assert TestClient(ev.app).post("/api/chat", json=chat_body("hi")).status_code == 200
+    assert [c["deadline"] for c in ev.chat.calls] == [None]
+    sv = build_app(tmp_path / "serve", "d7", mode="serve")
+    body = {k: v for k, v in chat_body("hi").items() if k != "trial_key"}
+    assert TestClient(sv.app).post("/api/chat", json=body).status_code == 200
+    assert sv.chat.calls and all(isinstance(c["deadline"], float) for c in sv.chat.calls)
+
+
 def test_d7_preset_uses_the_documented_statuses() -> None:
     from ragsec.defenses import d7_limits
 

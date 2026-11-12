@@ -39,6 +39,21 @@ def _payload(root: Path) -> dict[str, Any]:
             "provenance": meta["provenance"], "updated": str(meta["updated"]), "text": body.strip() + "\n"}
 
 
+def _warm_model(root: Path) -> None:
+    """Load Model A with the app's context size before the first question. Under `all`,
+    D7's wall-clock timeout covers the whole request, so a cold model load must not
+    happen inside it."""
+    from ragsec.settings import load_app_config
+
+    cfg = load_app_config(root=root)
+    try:
+        httpx.post(f"{cfg.ollama.url}/api/generate",
+                   json={"model": cfg.model("A").name, "keep_alive": cfg.ollama.keep_alive,
+                         "options": {"num_ctx": cfg.generation.num_ctx}}, timeout=600)
+    except httpx.HTTPError as exc:
+        print(f"could not warm the model ({exc}); the first answer may be slow")
+
+
 def _new_lines(log: Path, offset: int) -> list[str]:
     if not log.is_file() or log.stat().st_size <= offset:
         return []
@@ -65,6 +80,7 @@ def check(preset: str = "baseline", port: int = 8000, attempts: int = 3) -> bool
                            port=port, root=root, log_path=hp.logs(root) / "server_demo.log")
     print(f"starting the app in demo mode (preset {preset}, headless check)…")
     server.start()
+    _warm_model(root)
     client = httpx.Client(base_url=server.base_url, timeout=900)
     passed = False
     try:
@@ -108,6 +124,8 @@ def run(preset: str, port: int = 8000) -> None:
                            port=port, root=root, log_path=hp.logs(root) / "server_demo.log")
     print(f"starting the app in demo mode (preset {preset})…")
     server.start()
+    print("loading the model…")
+    _warm_model(root)
     client = httpx.Client(base_url=server.base_url, timeout=60)
     try:
         r = client.post("/eval/docs", json=payload)

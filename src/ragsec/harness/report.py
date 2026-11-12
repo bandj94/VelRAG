@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import math
 import re
 from collections import Counter
@@ -28,6 +29,7 @@ SINGLE_PRESETS = ["d1", "d2", "d3", "d4", "d5", "d6", "d7", "all"]
 ABLATION_PRESETS = [f"all_minus_d{i}" for i in range(1, 8)]
 PRESET_ORDER = ["baseline", *SINGLE_PRESETS, *ABLATION_PRESETS]
 SUITE_ORDER = ["dev", "heldout", "adaptive", "benign"]
+LOAD_PRESETS = ["baseline", "d7", "all"]  # §8.8's presets, in report order
 
 # A turn's virtual latency by stage (§10.2): model time is what Ollama reported for the
 # generation; every other stage is measured wall time. D1 runs inside retrieval, D4 inside
@@ -103,6 +105,10 @@ def _fmt(x: float | None, pct: bool = True) -> str:
     if x is None or (isinstance(x, float) and math.isnan(x)):
         return "—"
     return f"{100 * x:.1f}%" if pct else f"{x:.3f}"
+
+
+def _secs(x: float | None) -> str:
+    return "—" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:.1f}"
 
 
 def _table(headers: list[str], rows: list[list[str]]) -> str:
@@ -405,6 +411,139 @@ class Reporter:
                                      "correct": None if p is None else p == res, "info": {}})
         return real, by_design
 
+    # --- load test (extension, §8.8) -------------------------------------------
+    def load_rows(self) -> list[dict[str, Any]]:
+        """Normal users and attackers per (preset, condition), from the latest complete,
+        non-smoke run of each (results/raw/load/)."""
+        from ragsec.harness import load as ld
+
+        runs = ld.latest_runs(self.root)
+        keys = sorted(runs, key=lambda k: (LOAD_PRESETS.index(k[0]) if k[0] in LOAD_PRESETS else len(LOAD_PRESETS),
+                                           _order(k[0]), k[0], k[1]))
+        rows = []
+        for preset, attack in keys:
+            run = runs[(preset, attack)]
+            meta = run["meta"]
+            s = ld.summarize(run["normal"], run["attackers"])
+            statuses = " ".join(f"{k}:{v}" for k, v in s.pop("normal_statuses").items())
+            rows.append({"preset": preset, "attack": attack, "run_id": meta["run_id"],
+                         "window_minutes": meta.get("window_minutes"), "rate_per_minute": meta.get("rate_per_minute"),
+                         **s, "normal_statuses": statuses,
+                         "attacker_admitted": s["attacker_requests"] - s["attacker_rejected_by_d7"],
+                         "wall_minutes": round(float(meta.get("wall_seconds", 0.0)) / 60.0, 2)})
+        return rows
+
+    def load_dos_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """§8.8's verdict for every preset measured both with and without the attack."""
+        from ragsec.harness import load as ld
+        from ragsec.harness.data import read_yaml
+
+        cfg = read_yaml(hp.harness_config(self.root))["load"]
+        by_key = {(r["preset"], r["attack"]): r for r in rows}
+        out = []
+        for preset in dict.fromkeys(r["preset"] for r in rows):
+            if (preset, False) in by_key and (preset, True) in by_key:
+                v = ld.dos_verdict(by_key[(preset, False)], by_key[(preset, True)],
+                                   p95_multiplier=float(cfg["dos_p95_multiplier"]),
+                                   error_rate=float(cfg["dos_error_rate"]))
+                out.append({"preset": preset, **v})
+        return out
+
+    def _load_section(self, rows: list[dict[str, Any]], dos: list[dict[str, Any]]) -> str:
+        if not rows:
+            return "_Not run yet._"
+        cap_path = self.out / "load_capacity.json"
+        cap = json.loads(cap_path.read_text(encoding="utf-8")) if cap_path.is_file() else {}
+        first = rows[0]
+        parts = []
+        if cap:
+            parts.append(f"Capacity C = {cap['capacity_per_minute']:.2f} completed requests per minute (`baseline`, "
+                         f"one client sending back to back for {cap['elapsed_seconds'] / 60:.1f} minutes, "
+                         f"{cap['completed']} answers). Normal users ask at 50% of C = "
+                         f"{first['rate_per_minute']:.2f} requests per minute for {first['window_minutes']:g} "
+                         f"minutes, on the same schedule in every run "
+                         f"({first['normal_requests']} requests).")
+        parts += ["", "**Normal users** (latency from each request's scheduled time, over completed requests):", "",
+                  _table(["Preset", "Attack", "Requests", "Completed", "Error rate", "Statuses", "Median (s)",
+                          "p95 (s)", "Max (s)"],
+                         [[r["preset"], "yes" if r["attack"] else "no", str(r["normal_requests"]),
+                           str(r["normal_completed"]), _fmt(r["normal_error_rate"]), r["normal_statuses"],
+                           _secs(r["median_latency"]), _secs(r["p95_latency"]), _secs(r["max_latency"])]
+                          for r in rows]),
+                  "", "**Denial of service** (§8.8: with the attack, p95 latency more than doubles or the error rate "
+                  "exceeds 5%):", "",
+                  _table(["Preset", "p95 without → with (s)", "Ratio", "Error rate without → with", "DoS"],
+                         [[d["preset"], f"{_secs(d['p95_without'])} → {_secs(d['p95_with'])}",
+                           "—" if d["p95_ratio"] is None else f"{d['p95_ratio']:.1f}×",
+                           f"{_fmt(d['error_rate_without'])} → {_fmt(d['error_rate_with'])}",
+                           ("**yes**" if d["dos"] else "no") + (" (latency)" if d["latency_rule"] else "")
+                           + (" (errors)" if d["error_rule"] else "")] for d in dos]),
+                  "", "**Attackers** (2 users × 4 requests in flight; a worker pauses 1 s after an immediate "
+                  "rejection, so the rejected count depends on that pause):", "",
+                  _table(["Preset", "Requests", "Admitted", "Served (of which D5 refused)",
+                          "Rejected by D7 (413/429)", "Timed out by D7 (504)", "Cancelled at the end", "Other"],
+                         [[r["preset"], str(r["attacker_requests"]), str(r["attacker_admitted"]),
+                           f"{r['attacker_served']} ({r['attacker_refused_by_d5']})", str(r["attacker_rejected_by_d7"]),
+                           str(r["attacker_timed_out_by_d7"]), str(r["attacker_cancelled_at_end"]),
+                           str(r["attacker_other"])] for r in rows if r["attack"]])]
+        return "\n".join(parts)
+
+    def load_chart(self, rows: list[dict[str, Any]]) -> list[str]:
+        """13. Load test: normal users' p95 latency and error rate, with and without the attack."""
+        presets = list(dict.fromkeys(r["preset"] for r in rows))
+        if not presets:
+            return []
+        plt = self._pyplot()
+        self.out.mkdir(parents=True, exist_ok=True)
+        by_key = {(r["preset"], r["attack"]): r for r in rows}
+        fig, axes = plt.subplots(1, 2, figsize=(8.2, 0.9 + 0.5 * len(presets)), sharey=True)
+        panels = (("p95_latency", "p95 latency (s, log scale)"), ("normal_error_rate", "error rate"))
+        for ax, (field, label) in zip(axes, panels, strict=True):
+            for y, p in enumerate(presets):
+                pair = [by_key.get((p, a)) for a in (False, True)]
+                vals: list[float | None] = [None if r is None else r[field] for r in pair]
+                ys: list[float] = [float(y), float(y)]
+                v0, v1 = vals
+                if v0 is not None and v1 is not None:
+                    if abs(v0 - v1) < 1e-9:  # equal values: offset, so neither dot hides the other
+                        ys = [y - 0.13, y + 0.13]
+                    else:
+                        ax.plot([v0, v1], ys, color=AXIS, linewidth=2, zorder=1)
+                for k, (v, color) in enumerate(zip(vals, SERIES, strict=True)):
+                    if v is None:
+                        continue
+                    ax.scatter([v], [ys[k]], s=55, color=color, edgecolors=SURFACE, linewidths=1.5, zorder=2,
+                               label=("without the attack", "with the attack")[k] if y == 0 else None)
+                    if k == 1:
+                        text = f"{v:.0f} s" if field == "p95_latency" else f"{100 * v:.0f}%"
+                        ax.annotate(text, (v, ys[k]), xytext=(7, 0), textcoords="offset points", va="center",
+                                    color=INK2, fontsize=7)
+            values = [r[field] for r in rows if r[field] is not None]
+            if field == "p95_latency":
+                from matplotlib.ticker import NullFormatter
+
+                lo, hi = (min(values) / 1.4, max(values) * 1.4) if values else (1.0, 100.0)
+                ax.set_xscale("log")
+                ax.set_xlim(lo, hi)
+                ax.set_xticks([t for t in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000) if lo <= t <= hi])
+                ax.xaxis.set_major_formatter(lambda v, _p: f"{v:g}")
+                ax.xaxis.set_minor_formatter(NullFormatter())
+            else:
+                top = max([0.1, *(1.3 * v for v in values)])
+                ax.set_xlim(-0.03 * top, top)
+                ax.axvline(0.05, color=MUTED, linewidth=0.8, linestyle="--", zorder=0)
+                ax.xaxis.set_major_formatter(lambda v, _p: f"{100 * v:.0f}%")
+            ax.set_xlabel(label)
+            ax.grid(axis="x")
+            ax.set_axisbelow(True)
+            ax.tick_params(axis="y", length=0)
+        axes[0].set_yticks(range(len(presets)), presets)
+        axes[0].set_ylim(len(presets) - 0.4, -0.7)
+        axes[0].legend(loc="lower right", fontsize=7)
+        fig.suptitle("Load test, Model A: normal users with and without two attackers (dashed line: 5%)",
+                     fontsize=9, color=INK)
+        return [self._save(plt, fig, "load_latency.png")]
+
     # --- charts --------------------------------------------------------------
     @staticmethod
     def _pyplot() -> Any:
@@ -600,16 +739,21 @@ class Reporter:
         resources = self.resource_rows()
         compute = self.compute_rows()
         a5 = self.a5_rows()
+        load = self.load_rows()
+        load_dos = self.load_dos_rows(load) if load else []
         for name, rows in (("asr_dev.csv", asr), ("benign.csv", benign), ("a7_policies.csv", a7),
                            ("styles_and_payloads.csv", styles), ("retrieved_poison.csv", poison),
                            ("ablation.csv", ablation), ("heldout_pooled.csv", heldout),
                            ("adaptive.csv", adaptive), ("adaptive_budget.csv", budget),
                            ("latency_benign.csv", latency), ("resources.csv", resources),
-                           ("compute_time.csv", compute), ("a5_strict_loose.csv", a5)):
+                           ("compute_time.csv", compute), ("a5_strict_loose.csv", a5),
+                           ("load.csv", load), ("load_dos.csv", load_dos)):
             _write_csv(self.out / name, rows)
         charts = self.charts(asr, benign, latency, heldout, ablation, adaptive)
+        charts["charts-load"] = self.load_chart(load)
         sections: dict[str, str] = {}
-        sections["summary"] = self._summary(asr, benign, heldout, adaptive)
+        sections["summary"] = self._summary(asr, benign, heldout, adaptive, load_dos)
+        sections["results-load"] = self._load_section(load, load_dos)
         sections["results-single"] = _table(
             ["Model", "Preset", "Cat.", "Cases", "Trials", "ASR", "95% CI (cluster, approx.)", "≥1 of 3",
              "p vs baseline", "Label"],
@@ -714,7 +858,7 @@ class Reporter:
         return "\n".join(parts)
 
     def _summary(self, asr: list[dict[str, Any]], benign: list[dict[str, Any]], heldout: list[dict[str, Any]],
-                 adaptive: list[dict[str, Any]] | None = None) -> str:
+                 adaptive: list[dict[str, Any]] | None = None, load_dos: list[dict[str, Any]] | None = None) -> str:
         lines = []
         for model in self.models:
             base = [r for r in asr if r["model"] == model and r["preset"] == "baseline"]
@@ -752,6 +896,11 @@ class Reporter:
                              f"frozen dev set in the same categories"
                              + (f"; the same cases with every defense off: "
                                 f"{_fmt(sum(r['successes'] for r in ref) / ref_trials)}." if ref_trials else "."))
+        if load_dos:
+            lines.append("- Load test (Model A, serve mode, 2 attackers), denial of service by §8.8's rule: " + "; ".join(
+                f"{d['preset']} {'yes' if d['dos'] else 'no'} (p95 {_secs(d['p95_without'])} → "
+                f"{_secs(d['p95_with'])} s, errors {_fmt(d['error_rate_without'])} → {_fmt(d['error_rate_with'])})"
+                for d in load_dos) + ".")
         return "\n".join(lines) or "_No results yet._"
 
     def _predictions_section(self) -> str:

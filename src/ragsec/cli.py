@@ -653,45 +653,33 @@ def demo_exfil(preset: str = "baseline", port: int = 8000,
 
 # --------------------------------------------------------------------------- load
 @app.command()
-def load(preset: Annotated[str, typer.Option()],
-         with_attack: Annotated[bool, typer.Option("--with-attack")] = False,
-         capacity: Annotated[float | None, typer.Option(help="Reuse a calibrated capacity (requests/minute)")] = None,
+def load(preset: Annotated[str | None, typer.Option(help="Defense preset to load-test")] = None,
+         with_attack: Annotated[bool, typer.Option("--with-attack", help="Add the two attackers")] = False,
+         calibrate: Annotated[bool, typer.Option("--calibrate", help="Measure capacity C once, on baseline")] = False,
+         minutes: Annotated[float | None, typer.Option(
+             help="Window length; anything but the configured 10 minutes is a smoke run the report ignores")] = None,
+         run_id: Annotated[str | None, typer.Option("--run-id",
+                                                    help="Default: load-<preset>-<normal|attack>")] = None,
          port: int = 8000) -> None:
-    """Load test (extension, §8.8). Starts a serve-mode server for the preset."""
-    import asyncio
-
+    """Load test (extension, §8.8): Model A in serve mode, open-loop normal users, optional attackers."""
     from ragsec.harness import load as ld
-    from ragsec.harness import paths as hp
-    from ragsec.harness.data import load_directory
-    from ragsec.harness.runner import harness_cfg
-    from ragsec.harness.server_control import ServerProcess
+    from ragsec.harness.freeze import FreezeError
+    from ragsec.harness.server_control import ServerStartError
 
     root = repo_root()
-    hcfg = harness_cfg(root)
-    cap_file = hp.summary(root) / "load_capacity.json"
-    users = load_directory(hp.directory(root)).load_users
-    server = ServerProcess(mode="serve", preset=preset, model="A", run_tag="load-" + secrets.token_hex(4),
-                           port=port, root=root, log_path=hp.logs(root) / f"server_load_{preset}.log")
-    server.start()
     try:
-        if capacity is None:
-            if cap_file.is_file():
-                capacity = float(json.loads(cap_file.read_text())["capacity_per_minute"])
-            elif preset == "baseline":
-                capacity = asyncio.run(ld.calibrate(server.base_url, ld._questions(root),
-                                                    float(hcfg["load"]["calibration_minutes"]), users[0]))
-                cap_file.parent.mkdir(parents=True, exist_ok=True)
-                cap_file.write_text(json.dumps({"capacity_per_minute": capacity}), encoding="utf-8", newline="\n")
-            else:
-                _fail("calibrate on baseline first (ragsec load --preset baseline)")
-        assert capacity is not None
-        result = asyncio.run(ld.run_load(server.base_url, capacity_per_minute=capacity, with_attack=with_attack,
-                                         root=root, hcfg=hcfg, users=users))
-        out = ld.save(result, preset, with_attack, capacity, root)
-        typer.echo(json.dumps(result.summary(), indent=2))
-        typer.echo(f"saved {out}")
-    finally:
-        server.stop()
+        if calibrate:
+            if preset not in (None, "baseline") or with_attack:
+                _fail("--calibrate runs once, on baseline, without the attack")
+            ld.run_calibration(root, port=port)
+            return
+        if preset is None:
+            _fail("pass --preset (or --calibrate first)")
+        meta = ld.run_load_test(root, preset=preset, with_attack=with_attack, minutes=minutes, run_id=run_id,
+                                port=port)
+        typer.echo(json.dumps(meta["summary"], indent=2))
+    except (ld.LoadError, FreezeError, ServerStartError) as exc:
+        _fail(str(exc))
 
 
 # ------------------------------------------------------------------------- poison

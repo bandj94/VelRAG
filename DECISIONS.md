@@ -320,3 +320,95 @@ The user adds checkpoint notes here too.
   - *Confirmed by the check:* the README's reproduction block uses `benign validate`, because `benign freeze` refuses an already-frozen set (above).
   - The temporary clone (4.1 GB) was removed afterwards; its log stays in `scratch/` (gitignored, since it holds local paths).
 - **Time.** Recorded runs: 40 runs, 14,079 trials, 8.8 hours of wall time. Run 3's matrix took 12,435 trials in 7.7 h (including the two re-measured presets), tuning 0.3 h, and the held-out set 0.4 h. Run 4's development rounds took 9.6 minutes (120 trials) and its four final runs 14.8 minutes (144 trials). §11 estimated 25–35 GPU-hours for the dev matrix without the cache; the cache and the short turns that D5 and D7 refusals produce brought it to about a third of that.
+
+---
+
+## 2026-11-11/12 — Run 5: load test (extension, §8.8)
+
+The owner chose to run the extensions at the core checkpoint. Run 4's commit (`428976f`) matched GitHub and passed CI before Run 5 started.
+
+- **D7's serve-mode timeout now covers time spent queued in Ollama (bug fix, found while reviewing the load-test draft).**
+  - *What was wrong:* the wall-clock deadline was armed only when Ollama's response headers arrived. A probe (`scratch/probe_queue_headers.py`) showed that Ollama holds a queued request's headers until it starts generating it. Request B, sent while request A was generating, got its headers 5.4 s later, 0.07 s after A ended. So a request waiting in the queue could pass its 20 seconds before D7 acted, and Ollama then still evaluated its prompt before D7 discarded it.
+  - *Fix:* when a deadline is set, the request's connect, read, and pool timeouts are capped at the time left. A timeout at the deadline is a D7 timeout (504), and hanging up makes Ollama drop the queued request.
+  - *Scope:* serve and demo modes only. Eval mode passes no deadline (it uses the virtual clock; a test checks this), so no recorded result changes. D7's limits are unchanged (§7.3). This makes D7 the "20-second request timeout" that §7.1 describes; it is not tuning.
+  - *Tests:* a localhost server that holds its headers (the test fails on the old code and passes on the new), and a check that only wall-clock modes hand the model client a deadline.
+  - *Demo:* `ragsec demo exfil` now loads the model before opening the UI, so under `all` a cold model load can't use up the timeout while the owner records.
+  - *Alternative:* measure D7 as built and report the gap. Rejected: §7.1 defines a request timeout, and in this test only a few requests ever queue ahead of another, so the as-built version would mostly have produced late 504s and wasted prompt evaluations.
+- **The load-test draft (written in Run 1, never run) was corrected before any load run:**
+  - **Normal users' questions:** all 35 benign, non-email employee questions, including the 6 near misses. The draft dropped the near misses without a record; §8.8 names benign, non-email employee questions.
+  - **Attack messages:** all 8 dev-set A8 cases without poisoned documents (2 long output, 2 tool-call loops, 2 oversized inputs, 2 `reasoning_dos`). The draft's subtype filter predated the `reasoning_dos` label and dropped 2. The frozen file's hash is checked, and the held-out set is never used (rule 5).
+  - **Attackers:** each attacker's 4 workers take the 8 messages in turn (the draft's workers each cycled between 2). After a served response, a worker sends again at once; after an immediate D7 rejection (413 or 429), it waits 1 second. *Alternative:* retry at once. Rejected: under D7 that is a busy loop of instant rejections, thousands a second, each one a turn-log line, two of the messages 36,000 characters long. It would measure Python's request handling and the disk, not contention for the GPU, which is §8.8's question. The number of rejected attacker requests depends on this pause, so the report gives the admitted requests next to it.
+  - **Calibration:** C is completed requests ÷ elapsed minutes; the draft divided by the nominal 5 minutes, though the last request runs past the end. The model and the app are warmed first. Calibration runs once (`ragsec load --calibrate`) and refuses to overwrite `results/summary/load_capacity.json`.
+  - **End of a run:** attackers stop sending when the 10-minute window closes. Their requests already sent keep running while normal users' requests finish, so every normal request sent during the window meets the attack. Then whatever is left is cancelled and the server stopped, which closes Ollama's streams.
+  - **Metrics:** an error is any non-2xx status, or no answer within 900 s. Median and p95 latency are over completed requests (numpy's default linear interpolation for p95), measured from the scheduled time. A D5 refusal counts as completed; accuracy isn't measured here. The DoS rule uses strict inequalities: exactly double, or exactly 5%, is not DoS.
+  - **Pairing:** every run uses the same Poisson schedule and question draws (seed 99). A shorter smoke window is the start of the same schedule and never enters the report. Serve mode draws random generation seeds, so answers aren't paired the way eval runs are.
+  - **Records:** `results/raw/load/` (gitignored) holds a line per request (user, case ID, times, status, event types; no message or answer text) and each run's metadata: git commit and whether the tree had uncommitted changes, Ollama version, model digest, the model's GPU share from `/api/ps`, `OLLAMA_NUM_PARALLEL`, and a parallelism probe run before every run with the app's context size.
+  - **Warm-up:** before each run, the model is loaded with the app's `num_ctx` (a different size makes Ollama reload the model), and one unmeasured request goes through the app.
+  - The parallelism probe moved out of `doctor` into a shared function. Doctor's check and its fixture are unchanged.
+- **Calibration (2026-11-11, 23:23–23:28): C = 67.54 completed requests per minute** (338 answers in 300.25 s, all HTTP 200, `baseline`, one client). So normal users send 33.8 requests a minute, about 338 per 10-minute run, many more than the "~35" the plan guessed before C existed. *Rule 12 check, because 0.89 s per answer is fast:* in the turn log every calibration turn made one model call and ended with `stop`. Answers were short (median 28 output tokens, p95 140, max 181), with no overflows or errors. This matches Run 3's benign median latency of 1.0 s, so C is real. Ollama reported the model fully on the GPU at `num_ctx` 8192, and the probe confirmed one request at a time. `OLLAMA_NUM_PARALLEL` is unset in this shell, so the effective setting comes from the Ollama app (§3, the README's owner list).
+- **Two harness changes after calibration, before the smoke check** (neither affects calibration, which used one client):
+  - *No client-side connection cap.* At 338 requests per run, a `baseline` run under attack can have hundreds of requests outstanding. The draft's 200-connection cap would have made some of them wait in the test client rather than in the app or Ollama.
+  - *Peak requests in flight* is recorded per run. The app serves its sync endpoints from a pool of 40 threads, and D7's timer starts only when a thread picks a request up. So any wait for a thread goes untimed, and this figure shows whether that could have happened in the D7 runs.
+- **Smoke check (1 minute, `all` with the attack; `load-all-attack-smoke`, never reported).** This was the first time the app served many requests at once, with the classifier, embedder, and Chroma called from several threads. No unhandled errors: all 34 normal requests got HTTP 200, 6 of them D5 refusals of near-miss questions. Requests went out on schedule (largest lag 0.03 s), and at most 14 were in flight at once. Of the attackers' 368 requests, D7 rejected 182 as too long and 171 for its in-flight or rate limit, and 15 were served. No fix was needed before the matrix.
+- **`baseline` without the attack (23:32–23:42): 355 requests, no errors, median 2.27 s, p95 12.3 s, at most 13 in flight.**
+  - *Rule 12 check, because the p95 is high for a nominal 50% load:* the server's handler time matches the client's latency, and the non-model stages take 0.02 s. All the time is in the model call: Ollama's own processing averaged 1.14 s per request, plus a median 1.2 s (p95 11.3 s) waiting in its queue.
+  - The GPU was busy 67% of the window, not 50%. Poisson bursts did the rest: minute 6 brought 47 requests, the GPU ran at 99% for that minute, and its p95 reached 14.8 s.
+  - *Why 67%:* the same questions (median 1,521 prompt tokens in both, similar answer lengths) took Ollama 0.69 s per request through most of the calibration, but 1.1 s in this run.
+  - Ruled out from the turn log:
+    - CPU contention: requests that ran with nothing else in flight still took 1.08 s.
+    - The GPU idling between requests: requests that started straight after another took 1.12 s.
+    - Heat: calibration got faster after its first minute, and this run stayed flat.
+  - *The likely cause:* calibration sends every request as one user. The system prompt names the user early, so consecutive calibration requests share a long identical prefix that Ollama can reuse. Rotating 20 users breaks that prefix. Ollama's `prompt_eval_count` reported full prompt lengths either way, so the counts can't settle it.
+  - *Direct check, after the matrix* (`scratch/calibration_user_check.py`, 00:46–00:55): one client sent the same questions back to back on a fresh `baseline` server, in alternating 60-second blocks of one user and of 20 rotating users, four blocks each.
+    - Every rotating-user block was slower than every one-user block.
+    - One user: 1.007 s per request (59.6 a minute, 242 requests).
+    - Rotating users: 1.320 s per request (45.4 a minute, 184 requests), 31% more.
+    - The rotation is the cause. Prefix reuse is the mechanism that fits it: the user's email sits early in the system prompt, so a new user leaves less of the previous request's prompt to reuse.
+    - Against the multi-user rate, the "50% of C" normal load (33.8 a minute) is about 74% of capacity. That agrees with the 63–67% GPU busy share measured in the runs.
+    - C stays as measured, because §8.8's method fixed it and every run used it alike. The report gives both figures.
+  - *Consequence:* a single-client, single-user calibration overstates multi-user capacity. Every run still gets the same offered load (§8.8's purpose for C). The report states the measured GPU share next to the nominal 50%.
+- **`baseline` with the attack (23:46–23:57): denial of service by the latency rule.**
+  - *Normal users:* median 71.8 s, p95 101.3 s (8.2× the no-attack p95), max 106.7 s. All 355 were answered; none failed, because nothing in `baseline` times out.
+  - *Attackers:* 65 requests, 63 served and 2 cancelled at the end. They sent 22 emails (tool-call loops) and hit 16 context overflows (oversized inputs).
+  - *In flight:* up to 75 requests at once, past the app's 40 threads. That doesn't matter here, since D7 is off.
+- **`d7` without the attack (2026-11-12, 00:01–00:11): the same as `baseline`.** Median 2.28 s, p95 12.4 s, max 15.2 s, no errors, at most 14 in flight. Benign answers stay well under D7's 512-token cap, and none reached its 20-second timeout, so D7 costs normal users nothing at this load.
+- **`d7` with the attack (00:11–00:22): denial of service by the error rule, narrowly.**
+  - *Normal users:* 25 of 355 requests (7.0%) ended in D7's 504, every one at 20 s. That confirms the deadline fix end to end: queued requests are cut off at the deadline, not after it. The completed requests had a median of 12.1 s and a p95 of 19.2 s, 1.55× the no-attack p95, so the latency rule didn't fire.
+  - *Bursts:* the timeouts came in bursts (minutes 3–4 and 7–8). One 10-minute run can't say whether this attack would cross 5% every time.
+  - *Attackers:* D7 rejected 3,561 of their 3,663 requests (1,831 too long, 1,730 over the in-flight or rate limit). It admitted 102: 95 served, 7 timed out.
+  - *In flight:* at most 24 requests at once, under the app's 40 threads, so D7's timer covered all the waiting.
+- **Where the GPU's time went** (Ollama's own processing time over the 600 s window):
+
+  | Run | Attackers | Normal users | Attackers' answers (median, max) |
+  |---|---|---|---|
+  | `baseline` with the attack | 39% (63 requests) | 67% | 33 and 1,214 tokens |
+  | `d7` with the attack | 24% (102 admitted) | 63% | 33 and 512 tokens |
+
+  The `baseline` total passes 100% because its backlog ran 82 s past the window. Model A mostly doesn't produce the long outputs the A8 attacks ask for (as in Runs 2 and 3), so the attack works through numbers, not length.
+  - *Headroom:* the normal load already took about 65% of the GPU's time, more than the nominal 50%. Under `d7`, 24% more from the attackers pushed the GPU to about 87% busy, which is how waits passed D7's 20 s. With a genuine 50% normal load, the same attack would have more room. The verdict depends on headroom, and the report says so.
+- **`all` without the attack (00:23–00:33):** 355 requests, no errors, median 5.44 s, p95 12.1 s, max 14.6 s, at most 10 in flight.
+  - *Median:* D5's classifier scores every message and its retrieved chunks on the CPU, under concurrency, so it takes longer than `baseline`'s 2.28 s. Run 3's sequential, virtual-clock median for `all` was 2.2 s.
+  - *p95:* about the same as `baseline`, because D5 refused 38 of the 355 questions before they reached the GPU, which lightens its load.
+  - *D2:* it removed links in 27 answers.
+- **`all` with the attack (00:34–00:44): denial of service by the error rule, more than under `d7`.**
+  - *Normal users:* 71 of 355 requests (20.0%) failed.
+    - 68 were D7's 504s: 67 at 20 s and one at 21 s. D7 checks its deadline between stages, and a classifier pass can't be interrupted.
+    - 3 were 429s: D7 refused a second request from a user whose first was still waiting. That comes from the open-loop schedule, where a user can ask again before getting an answer; a real person usually waits. It's 0.8% of requests and doesn't change the verdict.
+    - The completed requests had a median of 15.8 s and a p95 of 19.6 s, 1.61× the no-attack p95.
+  - *Attackers:* of 3,654 requests, D7 rejected 3,535 (1,826 too long, 1,709 over its limits). D5 refused 49 more, and 102 were served and 17 timed out.
+  - *In flight:* at most 26 at once, under 40.
+  - *Why worse than `d7` (20% against 7%):* D5's classifier shares the CPU, and its time counts against D7's 20-second budget. The attackers' admitted messages added 484 s of classifier work over the window. Normal users' D5 stage went from a median of 2.4 s (p95 6.3 s) without the attack to 6.4 s (p95 17.2 s) with it, and their model calls still waited behind the attackers' (median 8.6 s). So with every defense on, the attack strains two resources, the GPU and the CPU. The defense that stops direct injections makes D7's timeout harder to meet.
+- **The matrix in one line:** by §8.8's rule the attack was a denial of service under all three presets.
+  - `baseline`: by latency (p95 12.3 → 101.3 s, no errors).
+  - `d7`: by errors (0 → 7.0%, p95 1.55×).
+  - `all`: by errors (0 → 20.0%, p95 1.61×).
+
+  D7 didn't prevent it. What it did was change the form: long waits became fast failures at 20 s, and it turned away 97% of the attackers' requests. All six runs and the calibration took 1 h 22 min (23:22–00:44), within §11's 1.5-hour estimate.
+- **Report and README (Run 5):**
+  - `ragsec report` now reads the latest complete, non-smoke load run per preset and condition from `results/raw/load/`. It writes `load.csv`, `load_dos.csv`, and `load_latency.png` (§15.1 item 13).
+    - The chart has two panels, p95 latency on a log scale and error rate with the 5% line, with and without the attack. It isn't a dual axis.
+    - Equal values get offset dots, so neither hides the other.
+  - The report fills the `results-load` and `charts-load` blocks and adds a summary line. In the attackers' table, D5's refusals (HTTP 200 with `d5_blocked`) appear inside "Served", in brackets.
+  - REPORT.md §10 is hand-written around those blocks: the method, what happened, and how to read it. §12's load-test limitation now gives the headroom and identity caveats. Both user-owned blocks are byte-identical (checked against `HEAD`).
+  - The README gains a headline bullet, the Run 5 table and commands, a Status row each for Runs 5 and 6, and the Run 6 step in the owner's list.
+  - It also loses an error from Run 4: the owner's list had said to "ask Claude Code to create" `.claude/settings.json`, which rule 2 forbids. It now says the file is the owner's to create.

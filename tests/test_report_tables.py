@@ -121,3 +121,58 @@ def test_build_writes_every_chart_and_new_table(fixture_root: Path) -> None:
     for name in ("results-latency", "results-resources", "results-a5"):
         assert sections[name].startswith("| Model"), name
     assert "adaptive final set under all (A1)" in sections["summary"]
+    assert sections["results-load"] == "_Not run yet._" and sections["charts-load"] == "_No charts yet._"
+
+
+def _load_run(root: Path, run_id: str, preset: str, attack: bool, latencies: list[float],
+              errors: dict[int, int] | None = None, attackers: list[int] | None = None, **meta: Any) -> None:
+    from ragsec.harness import load
+
+    normal = [load.Sample("normal", f"u{i}", f"B-{i}", float(i), float(i), float(i) + lat, 200)
+              for i, lat in enumerate(latencies)]
+    for status, n in (errors or {}).items():
+        normal += [load.Sample("normal", "u", "B-x", 0.0, 0.0, 20.0, status) for _ in range(n)]
+    atk = [load.Sample("attacker", "attacker1@velmora.example", "A8-001", 0.0, 0.0, 1.0, s) for s in attackers or []]
+    info = {"run_id": run_id, "preset": preset, "with_attack": attack, "complete": True, "smoke": False,
+            "ended_at": "2026-11-12T01:00:00", "window_minutes": 10.0, "rate_per_minute": 3.0,
+            "wall_seconds": 660.0, **meta}
+    load.save_run(root, run_id, info, normal, atk)
+
+
+def test_load_section_verdicts_and_chart(fixture_root: Path) -> None:
+    (fixture_root / "config").mkdir()
+    (fixture_root / "config" / "harness.yaml").write_bytes((ROOT / "config" / "harness.yaml").read_bytes())
+    summary = fixture_root / "results" / "summary"
+    summary.mkdir(parents=True, exist_ok=True)
+    (summary / "load_capacity.json").write_text(json.dumps(
+        {"capacity_per_minute": 6.0, "elapsed_seconds": 310.0, "completed": 31}), encoding="utf-8")
+    ten = [float(x) for x in range(1, 11)]  # p95 9.55 s
+    _load_run(fixture_root, "load-baseline-normal", "baseline", False, ten)
+    _load_run(fixture_root, "load-baseline-attack", "baseline", True, [10 * x for x in ten], attackers=[200] * 5)
+    _load_run(fixture_root, "load-d7-normal", "d7", False, ten)
+    _load_run(fixture_root, "load-d7-attack", "d7", True, ten, errors={504: 2}, attackers=[200, 429, 413, 504])
+    _load_run(fixture_root, "load-all-normal", "all", False, ten)
+    _load_run(fixture_root, "load-all-attack", "all", True, [x * 1.2 for x in ten], attackers=[429, 429])
+    _load_run(fixture_root, "load-all-attack-smoke", "all", True, [500.0] * 3, smoke=True,
+              ended_at="2026-11-12T09:00:00")  # never reported
+
+    r = report.Reporter(fixture_root)
+    rows = r.load_rows()
+    assert [(x["preset"], x["attack"]) for x in rows] == [("baseline", False), ("baseline", True), ("d7", False),
+                                                          ("d7", True), ("all", False), ("all", True)]
+    d7_attack = rows[3]
+    assert d7_attack["normal_error_rate"] == pytest.approx(2 / 12) and d7_attack["normal_statuses"] == "200:10 504:2"
+    assert (d7_attack["attacker_admitted"], d7_attack["attacker_rejected_by_d7"]) == (2, 2)
+    dos = {d["preset"]: d for d in r.load_dos_rows(rows)}
+    assert dos["baseline"]["dos"] and dos["baseline"]["latency_rule"] and not dos["baseline"]["error_rule"]
+    assert dos["d7"]["dos"] and dos["d7"]["error_rule"] and not dos["d7"]["latency_rule"]
+    assert not dos["all"]["dos"] and dos["all"]["p95_ratio"] == pytest.approx(1.2)
+
+    sections = r.build()
+    section = sections["results-load"]
+    assert "Capacity C = 6.00" in section and "3.00 requests per minute" in section
+    assert "| baseline | 9.5 → 95.5 | 10.0× |" in section and "**yes** (errors)" in section
+    assert "load_latency.png" in sections["charts-load"]
+    assert (summary / "load_latency.png").stat().st_size > 1000
+    assert "Load test (Model A, serve mode, 2 attackers)" in sections["summary"]
+    assert "all no (p95 9.5 → 11.5 s" in sections["summary"]

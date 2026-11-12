@@ -64,6 +64,9 @@ load:
   normal_load_fraction: 0.5
   attackers: 2
   attacker_in_flight: 4
+  attacker_retry_pause_seconds: 1.0   # after an immediate D7 rejection (413/429), not after served requests
+  normal_timeout_seconds: 900         # a normal request with no answer by then counts as an error
+  progress_every_seconds: 60
   schedule_seed: 99
   dos_p95_multiplier: 2.0
   dos_error_rate: 0.05

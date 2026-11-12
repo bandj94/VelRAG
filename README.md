@@ -51,6 +51,14 @@ Model A (qwen3:8b) with all seven defenses on, unless noted:
   - Median latency per question goes from 1.0 s to 2.2 s.
   - Most of the accuracy loss comes from the fallback classifier behind D5 and D6,
     which flags the corpus's own security-policy pages.
+- **Two attackers can deny service on the shared GPU, even with D7 on** (load test,
+  extension). This is by §8.8's rule: with the attack, normal users' p95 latency more
+  than doubles or their errors exceed 5%.
+  - With no defenses, normal users' p95 latency goes from 12 s to 101 s.
+  - D7 turns away 97% of the attackers' requests and keeps every answer under 20 s,
+    but 7% of normal requests then time out.
+  - With every defense on, 20% time out, because D5's classifier competes for the CPU
+    inside the same 20-second budget.
 
 Full tables, confidence intervals, sign-flip tests, and charts are in
 [REPORT.md](REPORT.md); every judgment call is in [DECISIONS.md](DECISIONS.md).
@@ -88,7 +96,8 @@ flowchart LR
 | 2 | Attack set, baseline attacks, demo | **Frozen** (`frozen-v1`): 120 cases (24 seeds + 115 Claude variants + 42 promptfoo → selected by variety), dev 80 / held-out 40; baseline ASR measured on both models |
 | 3 | Defenses measured, supply chain, held-out | **Done** (Checkpoint 3): 16 presets on Model A, 3 on Model B, held-out run once, S1–S4 caught, predictions scored |
 | 4 | Adaptive round, report, final checks | **Done** (core checkpoint): 40 development attempts within budget, 12-case final set on both models |
-| 5–6 | Load test, poisoning (extensions) | Scaffolds built, untested on real models |
+| 5 | Load test (extension) | **Done** (Checkpoint 5): capacity calibrated, 6 runs (3 presets, with and without the attack) |
+| 6 | Training-data poisoning (extension) | Scaffold built; waits for "start Run 6" |
 
 **Run 1 benign baseline** (60 questions × 5 trials, preset `baseline`, benign-v1):
 
@@ -160,6 +169,37 @@ Model B 14.2% → 2.5% (p = 0.039).
 - **Reading it:** with every defense off, the same cases barely work. So this round
   mostly measures promptfoo's encoded attacks, not the stack ([REPORT.md](REPORT.md) §9).
 
+**Run 5: load test (extension, §8.8).**
+- **Setup:** Model A in serve mode, with Ollama serving one request at a time.
+  - **Capacity C:** 67.5 answers a minute, from one client asking back to back.
+  - **Normal users:** 20 simulated employees ask benign questions on an open-loop
+    schedule at 50% of C: 355 requests in 10 minutes, the same in every run.
+  - **Attackers:** 2, each keeping 4 of the dev set's A8 chat-message attacks in
+    flight.
+- **Denial of service** means that with the attack, p95 latency more than doubles or
+  errors exceed 5%.
+
+| Preset | Attack | Median (s) | p95 (s) | Errors | Denial of service |
+|---|---|---|---|---|---|
+| baseline | no | 2.3 | 12.3 | 0.0% | |
+| baseline | yes | 71.8 | 101.3 | 0.0% | **yes** (latency, 8.2×) |
+| d7 | no | 2.3 | 12.4 | 0.0% | |
+| d7 | yes | 12.1 | 19.2 | 7.0% | **yes** (errors) |
+| all | no | 5.4 | 12.1 | 0.0% | |
+| all | yes | 15.8 | 19.6 | 20.0% | **yes** (errors) |
+
+- **What D7 does:** it turns long waits into errors. It rejects the attackers' oversized
+  and repeated requests (3,561 of 3,663), but the ~100 it admits still take a quarter of
+  the GPU's time, so some queued users hit its 20-second timeout.
+- **Under `all`:** D5's classifier adds CPU contention inside the same timeout.
+- **Headroom:** the normal load kept the GPU busy 63–67% of the time, not 50%. One-user
+  calibration makes requests look 31% cheaper than 20 rotating users do, so the
+  verdicts depend on that headroom.
+- **A fix:** D7's timeout didn't cover time spent queued in Ollama. That was fixed
+  before these runs; eval results are unaffected.
+
+Details: [REPORT.md](REPORT.md) §10 and [DECISIONS.md](DECISIONS.md) (Run 5).
+
 ## Seed attacks
 
 24 seed attacks (3 per category) live in `attacks/seeds/`, mapped to the OWASP Top 10
@@ -190,11 +230,12 @@ Candidates were tuned on Model A, so Model B's numbers show how well they transf
    show the stack stopping it (§15.4).
 3. The resume bullet.
 4. `.claude/settings.json` from IMPLEMENTATION.md Appendix B (Claude Code's permission
-   rules for this project), or ask Claude Code to create it.
+   rules for this project). Rule 2 makes it yours to create; Claude Code never writes it.
 5. Optional (§3): `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_LOADED_MODELS=1` as user
    environment variables, then restart Ollama.
-6. Decide whether to run the extensions: the load test (Run 5) and the training-data
-   poisoning experiment (Run 6).
+6. Say "start Run 6" (training-data poisoning) or "stop". If you want Run 6's
+   predictions in their own file, commit `PREDICTIONS_RUN6.sha256` before "start Run 6"
+   and keep `PREDICTIONS_RUN6.md` outside the repo folder (rule 15).
 
 No Hugging Face token is needed any more. Prompt Guard 2 access was denied, so the
 ungated fallback classifier is the one in use.
@@ -242,6 +283,15 @@ uv run ragsec adaptive finalize             # -> attacks/adaptive/final.yaml (3 
 uv run ragsec eval --suite adaptive --preset all --model A --run-id run4-adaptive-all-A   # and model B
 ```
 
+Run 5, the load test (Model A in serve mode; about 1.5 hours; nothing else on the GPU):
+
+```bash
+uv run ragsec load --calibrate                      # once: capacity C on baseline -> results/summary/load_capacity.json
+uv run ragsec load --preset all --with-attack --minutes 1   # optional smoke run; the report ignores it
+uv run ragsec load --preset baseline                # then --with-attack; same for d7 and all
+uv run ragsec report                                # REPORT.md §10, results/summary/load*.csv, load_latency.png
+```
+
 Try the app by hand: `uv run ragsec serve --preset baseline`, then open
 http://127.0.0.1:8000 (or `uv run ragsec ask "What are the helpdesk hours?"`).
 
@@ -264,7 +314,7 @@ http://127.0.0.1:8000 (or `uv run ragsec ask "What are the helpdesk hours?"`).
 | `ragsec audit sample` / `score` | Check audit (§10.5) |
 | `ragsec report [--scoring core]` | Summary tables, charts, predictions scoring |
 | `ragsec demo exfil --preset baseline\|all [--check]` | Live exfiltration demo in the real UI; `--check` runs it headless |
-| `ragsec load --preset P [--with-attack]` | Load-test extension |
+| `ragsec load --calibrate` / `--preset P [--with-attack] [--minutes M]` | Load test (§8.8): capacity once, then normal users with or without two attackers |
 | `ragsec poison build-data` / `train` / `eval` | Poisoning extension (`train/` has its own CUDA environment) |
 | `ragsec ask "question" [--role hr]` | Send one question to a running server |
 

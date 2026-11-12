@@ -196,6 +196,7 @@ class OllamaChatModel:
         self.cache = cache
         self.refused_patterns = refused_patterns
         self.filled_patterns = filled_patterns
+        self._connect_timeout = connect_timeout
         self._client = httpx.Client(
             transport=transport,
             timeout=httpx.Timeout(connect=connect_timeout, read=read_timeout, write=60.0, pool=60.0),
@@ -277,8 +278,17 @@ class OllamaChatModel:
         result = ModelResult()
         parts: list[str] = []
         watchdog: threading.Timer | None = None
+        timeout: httpx.Timeout | None = None
+        if deadline is not None:
+            # Ollama sends a queued request's headers only when it starts generating it,
+            # so the wait in its queue must count against the deadline too: every phase of
+            # the request gets at most the time left. Hanging up makes Ollama drop it.
+            left = max(0.001, deadline - time.perf_counter())
+            timeout = httpx.Timeout(connect=min(self._connect_timeout, left), read=left, write=min(60.0, left),
+                                    pool=left)
         try:
-            with self._client.stream("POST", f"{self.base_url}/api/chat", json=body) as resp:
+            with self._client.stream("POST", f"{self.base_url}/api/chat", json=body,
+                                     timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT) as resp:
                 result.http_status = resp.status_code
                 if resp.status_code != 200:
                     result.error = _error_text(resp.read())
@@ -314,7 +324,7 @@ class OllamaChatModel:
                         result.prompt_eval_seconds = (obj.get("prompt_eval_duration") or 0) / 1e9
                         result.eval_seconds = (obj.get("eval_duration") or 0) / 1e9
                         break
-        except (httpx.StreamClosed, httpx.ReadError, httpx.RemoteProtocolError) as exc:
+        except (httpx.StreamClosed, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as exc:
             if deadline is not None and time.perf_counter() >= deadline - 0.05:
                 result.stream_closed_early = True
             else:

@@ -246,34 +246,9 @@ class Doctor:
 
     def parallel_probe(self, url: str) -> None:
         model = self.cfg.model("A")
-        times: dict[int, dict[str, float]] = {}
-
-        def worker(i: int) -> None:
-            body: dict[str, Any] = {"model": model.name, "stream": True, "truncate": False, "shift": False,
-                                    "messages": [{"role": "user", "content": f"List {i + 40} animals, one per line."}],
-                                    "options": {"num_ctx": 4096, "num_predict": 200, "seed": i}}
-            if model.think is not None:
-                body["think"] = model.think
-            first = last = 0.0
-            with httpx.Client(timeout=600) as client, client.stream("POST", f"{url}/api/chat", json=body) as resp:
-                for line in resp.iter_lines():
-                    if not line:
-                        continue
-                    now = time.perf_counter()
-                    if not first:
-                        first = now
-                    last = now
-            times[i] = {"first": first, "last": last}
-
-        threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
-        for t in threads:
-            t.start()
-            time.sleep(0.05)
-        for t in threads:
-            t.join()
-        a, b = sorted(times.values(), key=lambda x: x["first"])
-        serialized = b["first"] >= a["last"] - 0.5
-        self._save_fixture("parallel_probe", {"requests": [a, b], "serialized": serialized})
+        result = probe_parallelism(url, model.name, model.think)
+        serialized = bool(result["serialized"])
+        self._save_fixture("parallel_probe", result)
         self.add("probe: effective parallelism is 1", "ok" if serialized else "fail",
                  "second request started after the first finished" if serialized
                  else "requests overlapped: set OLLAMA_NUM_PARALLEL=1 and restart Ollama (§3)")
@@ -396,6 +371,38 @@ class Doctor:
         self.pins.huggingface[key] = HFPin(repo=repo, revision=revision, files=files)
         self.pins_changed = True
         self.add(f"download {repo}", "ok", f"revision {revision[:12]}…, {len(files)} files pinned")
+
+
+def probe_parallelism(url: str, model_name: str, think: bool | None, num_ctx: int = 4096) -> dict[str, Any]:
+    """Two short streamed requests sent 50 ms apart. With OLLAMA_NUM_PARALLEL=1 the second
+    starts only after the first finishes. Used by `ragsec doctor` and the load test."""
+    times: dict[int, dict[str, float]] = {}
+
+    def worker(i: int) -> None:
+        body: dict[str, Any] = {"model": model_name, "stream": True, "truncate": False, "shift": False,
+                                "messages": [{"role": "user", "content": f"List {i + 40} animals, one per line."}],
+                                "options": {"num_ctx": num_ctx, "num_predict": 200, "seed": i}}
+        if think is not None:
+            body["think"] = think
+        first = last = 0.0
+        with httpx.Client(timeout=600) as client, client.stream("POST", f"{url}/api/chat", json=body) as resp:
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                now = time.perf_counter()
+                if not first:
+                    first = now
+                last = now
+        times[i] = {"first": first, "last": last}
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+        time.sleep(0.05)
+    for t in threads:
+        t.join()
+    a, b = sorted(times.values(), key=lambda x: x["first"])
+    return {"requests": [a, b], "serialized": b["first"] >= a["last"] - 0.5}
 
 
 def _safe_json(r: httpx.Response) -> dict[str, Any]:

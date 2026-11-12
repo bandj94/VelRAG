@@ -1,0 +1,55 @@
+{
+  "capacity_per_minute": 67.54371357202332,
+  "completed": 338,
+  "sent": 338,
+  "elapsed_seconds": 300.25,
+  "statuses": {
+    "200": 338
+  },
+  "preset": "baseline",
+  "model": "A",
+  "model_name": "qwen3:8b",
+  "minutes": 5.0,
+  "user": "loaduser01@velmora.example",
+  "question_order_seed": 99,
+  "started_at": "2026-11-11T23:22:31",
+  "ended_at": "2026-11-11T23:28:10",
+  "parallel_probe": {
+    "requests": [
+      {
+        "first": 171767.5238449,
+        "last": 171770.444823
+      },
+      {
+        "first": 171770.506557,
+        "last": 171773.3780987
+      }
+    ],
+    "serialized": true
+  },
+  "warm_up": {
+    "status": 200,
+    "seconds": 5.75
+  },
+  "ollama": {
+    "env": {
+      "OLLAMA_NUM_PARALLEL": null,
+      "OLLAMA_MAX_LOADED_MODELS": null
+    },
+    "version": "0.40.16",
+    "digest": "500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41",
+    "loaded": {
+      "size": 6194766806,
+      "size_vram": 6194766806,
+      "gpu_share": 1.0,
+      "context_length": 8192
+    }
+  },
+  "git_commit": "428976f36b83e7de874385d3b5d6f4c40a54f725",
+  "git_dirty": true,
+  "machine": {
+    "platform": "Windows-11-10.0.22631-SP0",
+    "python": "3.12.10",
+    "processor": "Intel64 Family 6 Model 154 Stepping 3, GenuineIntel"
+  }
+}
