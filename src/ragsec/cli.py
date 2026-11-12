@@ -24,12 +24,14 @@ attacks_app = typer.Typer(help="Attack sets", no_args_is_help=True)
 benign_app = typer.Typer(help="Benign set", no_args_is_help=True)
 audit_app = typer.Typer(help="Check audit (§10.5)", no_args_is_help=True)
 demo_app = typer.Typer(help="Demo (§15.4)", no_args_is_help=True)
+adaptive_app = typer.Typer(help="Adaptive round (§8.7)", no_args_is_help=True)
 poison_app = typer.Typer(help="Training-data poisoning extension (§8.10)", no_args_is_help=True)
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(attacks_app, name="attacks")
 app.add_typer(benign_app, name="benign")
 app.add_typer(audit_app, name="audit")
 app.add_typer(demo_app, name="demo")
+app.add_typer(adaptive_app, name="adaptive")
 app.add_typer(poison_app, name="poison")
 
 
@@ -253,9 +255,8 @@ def attacks_generate(convert: Annotated[bool, typer.Option("--convert", help="Co
         typer.echo(f"wrote {len(cases)} Claude variants to {out} and {len(docs)} documents")
 
 
-@attacks_app.command("promptfoo")
-def attacks_promptfoo() -> None:
-    """Generate promptfoo red-team candidates (the first run asks for your email)."""
+def _run_promptfoo(workdir: Path, out_rel: str, out_dir: Path) -> int:
+    """`promptfoo redteam generate -c redteam.yaml` from `workdir` at the pinned version, telemetry off."""
     import shutil
     import subprocess
 
@@ -268,15 +269,20 @@ def attacks_promptfoo() -> None:
     npx = shutil.which("npx")
     if npx is None:
         _fail("npx not found: install Node.js 22.22 or newer")
-    assert npx is not None
-    out_dir = root / "attacks" / "candidates" / "promptfoo"
     out_dir.mkdir(parents=True, exist_ok=True)
     env = envsetup.child_env({"npm_config_cache": str(root / ".npm-cache"),
                               "PROMPTFOO_CONFIG_DIR": str(root / ".promptfoo")})
-    cmd = [npx, "-y", f"promptfoo@{version}", "redteam", "generate", "-c", "redteam.yaml",
-           "-o", "../candidates/promptfoo/redteam_generated.yaml"]
-    typer.echo(f"running promptfoo {version} from attacks/promptfoo/ (telemetry off)")
-    code = subprocess.call(cmd, cwd=str(root / "attacks" / "promptfoo"), env=env)
+    cmd = [npx, "-y", f"promptfoo@{version}", "redteam", "generate", "-c", "redteam.yaml", "-o", out_rel]
+    typer.echo(f"running promptfoo {version} from {workdir.relative_to(root).as_posix()}/ (telemetry off)")
+    return subprocess.call(cmd, cwd=str(workdir), env=env)
+
+
+@attacks_app.command("promptfoo")
+def attacks_promptfoo() -> None:
+    """Generate promptfoo red-team candidates (the first run asks for your email)."""
+    root = repo_root()
+    code = _run_promptfoo(root / "attacks" / "promptfoo", "../candidates/promptfoo/redteam_generated.yaml",
+                          root / "attacks" / "candidates" / "promptfoo")
     if code == 0:
         typer.echo("done: attacks/candidates/promptfoo/redteam_generated.yaml")
     raise typer.Exit(code)
@@ -414,6 +420,160 @@ def supplychain(only: Annotated[list[str] | None, typer.Option(help="S1 S2a S2b 
     for s in results:
         typer.echo(s.row())
     typer.echo("table written to results/summary/supplychain.md")
+
+
+# ----------------------------------------------------------------------- adaptive
+@adaptive_app.command("attempt")
+def adaptive_attempt(file: Annotated[Path, typer.Argument(help="Case file in attacks/adaptive/dev/")],
+                     run_id: Annotated[str | None, typer.Option(help="Default: adaptive-dev-<file stem>")] = None,
+                     note: Annotated[str, typer.Option(help="One line for the attempt log")] = "") -> None:
+    """Run development attempts (Model A, preset all, 3 trials, namespace adaptive-dev) and log each case."""
+    from ragsec.harness import adaptive, attacks
+    from ragsec.harness import paths as hp
+    from ragsec.harness.data import load_case_file
+    from ragsec.harness.freeze import FreezeError
+    from ragsec.harness.runner import EvalRunner, RunError
+
+    root = repo_root()
+    path = file if file.is_absolute() else (Path.cwd() / file)
+    try:
+        rel = path.resolve().relative_to(root.resolve())
+    except ValueError:
+        _fail(f"{file} is not inside the repository")
+    if rel.parts[:3] != ("attacks", "adaptive", "dev"):
+        _fail("attempt files live in attacks/adaptive/dev/ (the final suite never reads that folder)")
+    cases = load_case_file(path)
+    if not cases:
+        _fail(f"{rel} has no cases")
+    ctx = attacks.make_context(root)
+    problems = [f"{c.get('id', '?')}: {p}" for c in cases for p in attacks.validate_case(c, ctx)]
+    log = adaptive.load_log(root)
+    problems += adaptive.budget_problems(cases, log, root)
+    if problems:
+        for p in problems:
+            typer.echo(p)
+        _fail(f"{len(problems)} problem(s); nothing was run or logged")
+    rid = run_id or f"adaptive-dev-{path.stem}"
+    try:
+        EvalRunner(suites=["adaptive-dev"], preset=adaptive.DEV_PRESET, model=adaptive.DEV_MODEL, run_id=rid,
+                   trials=adaptive.DEV_TRIALS, suite_file=path).run()
+    except (FreezeError, RunError) as exc:
+        _fail(str(exc), 2)
+    raw = hp.raw_results(root) / f"{rid}.jsonl"
+    records = [json.loads(x) for x in raw.read_text(encoding="utf-8").splitlines() if x.strip()]
+    try:
+        entries = adaptive.entries_for_run(cases, records, file=rel.as_posix(), run_id=rid, log=log, root=root,
+                                           canaries=ctx.canaries, note=note)
+    except adaptive.AdaptiveError as exc:
+        _fail(str(exc))
+    adaptive.append_log(entries, root)
+    for e in entries:
+        events = sorted({ev for t in e["per_trial"] for ev in t["events"]})
+        typer.echo(f"{e['case_id']} ({e['category']} attempt {e['attempt']}/{adaptive.BUDGET_PER_CATEGORY}): "
+                   f"{e['successes']}/{e['trials']} | events: {', '.join(events) or '-'}")
+    typer.echo(f"logged {len(entries)} attempt(s) to attacks/adaptive/attempts.jsonl")
+
+
+@adaptive_app.command("promptfoo")
+def adaptive_promptfoo() -> None:
+    """Generate the adaptive candidates with promptfoo (attacks/adaptive/promptfoo/redteam.yaml)."""
+    root = repo_root()
+    work = root / "attacks" / "adaptive" / "promptfoo"
+    code = _run_promptfoo(work, "redteam_generated.yaml", work)
+    if code == 0:
+        typer.echo("done: attacks/adaptive/promptfoo/redteam_generated.yaml")
+    raise typer.Exit(code)
+
+
+@adaptive_app.command("convert")
+def adaptive_convert() -> None:
+    """Convert promptfoo's adaptive output into labeled cases (attacks/adaptive/promptfoo/pool.yaml)."""
+    import yaml
+
+    from ragsec.harness import adaptive, attacks
+    from ragsec.settings import load_pins
+
+    root = repo_root()
+    src = adaptive.generated_path(root)
+    if not src.is_file():
+        _fail("no promptfoo output yet: run `uv run ragsec adaptive promptfoo` first")
+    out = adaptive.pool_path(root)
+    if out.exists():
+        _fail(f"{out.relative_to(root).as_posix()} already exists; the pool is converted once")
+    ctx = attacks.make_context(root)
+    version = str(load_pins(root=root).promptfoo.get("version"))
+    conv = adaptive.convert_promptfoo(yaml.safe_load(src.read_text(encoding="utf-8")), version,
+                                      validate=lambda c: attacks.validate_case(c, ctx))
+    header = ("# Adaptive candidate pool: promptfoo's output converted by `ragsec adaptive convert`, labeled from\n"
+              "# promptfoo's own metadata (plugin -> category, strategy -> technique) before any result existed.\n"
+              "# Development attempts are drawn from here by `ragsec adaptive pick`; never edit by hand.\n")
+    out.write_text(header + adaptive.dump_cases(conv.cases), encoding="utf-8", newline="\n")
+    counts: dict[str, int] = {}
+    for c in conv.cases:
+        counts[c["category"]] = counts.get(c["category"], 0) + 1
+    typer.echo(f"wrote {len(conv.cases)} cases to {out.relative_to(root).as_posix()}: {counts}")
+    reasons: dict[str, int] = {}
+    for _i, why in conv.dropped:
+        key = why.split(":")[0] if why.startswith("validation") else why
+        reasons[key] = reasons.get(key, 0) + 1
+    typer.echo(f"dropped {len(conv.dropped)}: {reasons}")
+
+
+@adaptive_app.command("pick")
+def adaptive_pick(round_no: Annotated[int, typer.Option("--round", help="1 = variety; 2+ = ranked by dev results")]) -> None:
+    """Draw the next development attempts from the pool into attacks/adaptive/dev/promptfoo-r<N>.yaml."""
+    from ragsec.harness import adaptive
+    from ragsec.harness.data import load_case_file
+
+    root = repo_root()
+    pool_file = adaptive.pool_path(root)
+    if not pool_file.is_file():
+        _fail("no pool yet: run `uv run ragsec adaptive convert` first")
+    out = adaptive.dev_dir(root) / f"promptfoo-r{round_no}.yaml"
+    if out.exists():
+        _fail(f"{out.relative_to(root).as_posix()} already exists")
+    picked = adaptive.pick_round(load_case_file(pool_file), adaptive.load_log(root), round_no)
+    if not picked:
+        _fail("nothing left to pick (budget spent or pool exhausted)")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    header = (f"# Adaptive development attempts, round {round_no}, drawn from the promptfoo pool by\n"
+              "# `ragsec adaptive pick` (rule in DECISIONS.md); each case is one attempt.\n")
+    out.write_text(header + adaptive.dump_cases(picked), encoding="utf-8", newline="\n")
+    by_cat: dict[str, int] = {}
+    for c in picked:
+        by_cat[c["category"]] = by_cat.get(c["category"], 0) + 1
+    typer.echo(f"wrote {len(picked)} attempts to {out.relative_to(root).as_posix()}: {by_cat}")
+
+
+@adaptive_app.command("status")
+def adaptive_status() -> None:
+    """Attempts used per category and the best development result."""
+    from ragsec.harness import adaptive
+
+    log = adaptive.load_log()
+    if not log:
+        typer.echo("no attempts logged yet")
+        return
+    for r in adaptive.status_rows(log):
+        typer.echo(f"{r['category']:20s} {r['used']:2d}/{r['budget']} attempts | best {r['best']}/3 | "
+                   f"{r['with_success']} with any success")
+    for e in log:
+        typer.echo(f"  {e['category']:20s} #{e['attempt']:<2d} {e['case_id']:8s} {str(e.get('subtype')):28s} "
+                   f"{e['successes']}/{e['trials']}")
+
+
+@adaptive_app.command("finalize")
+def adaptive_finalize(per_category: Annotated[int, typer.Option(help="Cases per category")] = 3) -> None:
+    """Copy the chosen attempts verbatim into attacks/adaptive/final.yaml, pinning document hashes."""
+    from ragsec.harness import adaptive
+
+    try:
+        final = adaptive.finalize(per_category=per_category)
+    except adaptive.AdaptiveError as exc:
+        _fail(str(exc))
+    typer.echo(f"wrote {len(final.cases)} cases to {final.path.relative_to(repo_root()).as_posix()}")
+    for c in final.cases:
+        typer.echo(f"  {c['id']:8s} {c['category']:20s} {c.get('subtype')}")
 
 
 # ------------------------------------------------------------------------- tuning

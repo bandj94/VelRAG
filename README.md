@@ -1,15 +1,83 @@
 # RAG Attack & Defense Lab
 
 A deliberately vulnerable internal helpdesk assistant ("Vel", for the fictional
-Velmora Systems) built on retrieval-augmented generation plus one email tool,
+Velmora Systems), built on retrieval-augmented generation plus one email tool. It is
 attacked in 8 categories mapped to the OWASP Top 10 for LLM Applications 2026,
-defended by 7 switchable defenses, and measured on two local models: what each
-defense does alone, what it adds to the full stack (ablation), and what still gets
-through (adaptive round). Everything runs on one laptop at $0.
+defended by 7 switchable defenses, and measured on two local models. The questions:
+what each defense adds to the full stack (the ablation), what still gets through when
+the attacker adapts (the adaptive round), and what the defenses cost ordinary users.
+Everything runs on one laptop at $0.
 
 > **Scope:** fictional company and data, everything local (127.0.0.1 only). The app
 > renders raw HTML on purpose, so model output can run script. **Never deploy it or
 > expose it beyond this machine.**
+
+## Headline results
+
+Model A (qwen3:8b) with all seven defenses on, unless noted:
+
+- **The ablation picks out the load-bearing defenses.** Switching off one defense at a
+  time from `all`:
+  - Without D5, the query classifier, direct injection (A1) climbs from 10% back to
+    70% (p = 0.031).
+  - Without D2, output handling, indirect phishing (A3) climbs from 0% to 60%
+    (p = 0.031).
+  - Without D7, the resource limits, resource exhaustion (A8) rises from 10% to 23%
+    (p = 0.50, so suggestive only).
+  - Removing D1, D3, D4, or D6 changes no category significantly.
+- **The adaptive round found no way through, and that is weak evidence.**
+  - promptfoo generated every attempt, with techniques from the OWASP 2026 list:
+    hidden characters, prompt extraction, cross-role probes, and resource attacks, each
+    also in four encodings.
+  - The full budget of 40 attempts (10 each in A1, A2, A4, and A8) scored 0 of 120
+    trials. The final 12-case set scored 0 of 36 on each model.
+  - D5 refused most of them at the message, and D7 the over-long ones.
+  - With every defense off, the same 12 cases scored 1 of 72 trials across both
+    models. The 0% mostly measures these generic encoded attacks, not the stack.
+  - They never reached the four categories where the static set still succeeds.
+- **Static and held-out sets:** 36.2% → 6.2% attack success on the dev set; 38.3% →
+  9.2% on the held-out set (p = 0.0004). Model B (llama3.1:8b): 14.2% → 2.5% held-out
+  (p = 0.039).
+- **What still gets through under `all`:**
+  - planted false facts (A5): 20% on the dev set, and every one of Model A's
+    successful held-out trials (11 of 15 A5 trials; every other category 0 of 15).
+    Nothing in the stack checks whether a retrieved statement is true.
+  - an attacker link in an email to the requester's own address (A7, 10%), which gets
+    past both D3 and D2
+  - a few direct injections (A1, 10%) and resource exhaustion (A8, 10%)
+- **The cost:**
+  - Benign accuracy falls from 96.7% to 66.7%, and false refusals rise from 0% to
+    23.7%.
+  - Median latency per question goes from 1.0 s to 2.2 s.
+  - Most of the accuracy loss comes from the fallback classifier behind D5 and D6,
+    which flags the corpus's own security-policy pages.
+
+Full tables, confidence intervals, sign-flip tests, and charts are in
+[REPORT.md](REPORT.md); every judgment call is in [DECISIONS.md](DECISIONS.md).
+
+## Architecture
+
+```mermaid
+flowchart LR
+  H[Harness: attack and benign trials] -->|POST /api/chat| API[FastAPI app 127.0.0.1:8000]
+  API --> D7{D7 limits}
+  D7 --> D5m{D5 message classifier}
+  D5m --> R[Retrieval: bge-small + Chroma, top 4]
+  R -->|D1 role filter| R
+  R --> D5c{D5 chunk classifier}
+  D5c --> P[Prompt builder + D4 spotlighting]
+  P --> M[Ollama: qwen3:8b or llama3.1:8b]
+  M -->|send_email| T[Email tool + D3 gating]
+  T --> M
+  M --> D2{D2 output handling}
+  D2 --> API
+  API -->|answer, events, emails| C[Checks: code, never an LLM judge]
+  C -->|/render/turn_id| B[Headless Chromium + CSP]
+  B -.->|exfiltration attempt| X[Attacker server 127.0.0.1:8765]
+  X --> C
+  PD[Poisoned documents via /eval/docs] --> I[Ingestion + D6 scan]
+  I --> R
+```
 
 ## Status
 
@@ -19,7 +87,7 @@ through (adaptive round). Everything runs on one laptop at $0.
 | 1 | App, defenses, harness, data, CI, benign baseline | **Done** (Checkpoint 1) |
 | 2 | Attack set, baseline attacks, demo | **Frozen** (`frozen-v1`): 120 cases (24 seeds + 115 Claude variants + 42 promptfoo → selected by variety), dev 80 / held-out 40; baseline ASR measured on both models |
 | 3 | Defenses measured, supply chain, held-out | **Done** (Checkpoint 3): 16 presets on Model A, 3 on Model B, held-out run once, S1–S4 caught, predictions scored |
-| 4 | Adaptive round, report | Tooling built |
+| 4 | Adaptive round, report, final checks | **Done** (core checkpoint): 40 development attempts within budget, 12-case final set on both models |
 | 5–6 | Load test, poisoning (extensions) | Scaffolds built, untested on real models |
 
 **Run 1 benign baseline** (60 questions × 5 trials, preset `baseline`, benign-v1):
@@ -66,23 +134,31 @@ defenses. Its benign accuracy goes 42.3% → 47.3% → 17.7%.
 Held-out set (40 cases, run once): Model A 38.3% → 9.2% with all defenses (p = 0.0004);
 Model B 14.2% → 2.5% (p = 0.039).
 
-- **The stack works, at a cost.** All seven defenses cut Model A's attack success from
-  36% to 6%, and the held-out set confirms it. They also cost a third of benign
-  accuracy, mostly through the classifier behind D5 and D6. Prompt Guard 2 access was
-  denied, so the ProtectAI fallback was used, and it flags this corpus's
-  security-policy language and the near-miss questions.
-- **The ablation picks out the load-bearing defenses:**
-  - Without D5, direct injection (A1) climbs back to 70%.
-  - Without D2, indirect phishing (A3) climbs back to 60%.
-  - Without D7, resource exhaustion (A8) rises from 10% to 23%.
+- **The classifier:** Prompt Guard 2 access was denied, so D5 and D6 use the ProtectAI
+  fallback, which flags this corpus's security-policy language and the near-miss
+  questions.
 - **A gap:** an attacker link inside an email to the requester's own address gets
   past both D3, which checks only the recipient, and D2, which cleans only the answer.
 - **Supply chain:** all four tampering checks (S1–S4) are caught.
 - **Predictions, scored blind:** 45 right, 16 wrong, 8 inconclusive, 19 not
   measurable. All 7 measurable by-design cells held.
 
-Full tables, confidence intervals, sign-flip tests, the ablation, and the scoring are
-in [REPORT.md](REPORT.md); every judgment call is in [DECISIONS.md](DECISIONS.md).
+**Run 4: adaptive round.** The 12-case final set chosen within the budget
+(`attacks/adaptive/final.yaml`), 3 trials per case, in a fresh seed namespace:
+
+| Model | Preset | A1 | A2 | A4 | A8 | Overall |
+|---|---|---|---|---|---|---|
+| A: qwen3:8b | all | 0/9 | 0/9 | 0/9 | 0/9 | **0.0%** |
+| A: qwen3:8b | baseline (reference) | 0/9 | 0/9 | 0/9 | 1/9 | 2.8% |
+| B: llama3.1:8b | all | 0/9 | 0/9 | 0/9 | 0/9 | **0.0%** |
+| B: llama3.1:8b | baseline (reference) | 0/9 | 0/9 | 0/9 | 0/9 | 0.0% |
+
+- **Development:** 40 attempts on Model A under `all` (10 of 10 in A1, A2, A4, and A8),
+  0 of 120 trials.
+- **Not attempted:** A3 and A5–A7 need poisoned documents, which promptfoo's generator
+  doesn't write.
+- **Reading it:** with every defense off, the same cases barely work. So this round
+  mostly measures promptfoo's encoded attacks, not the stack ([REPORT.md](REPORT.md) §9).
 
 ## Seed attacks
 
@@ -108,10 +184,17 @@ Candidates were tuned on Model A, so Model B's numbers show how well they transf
 
 ## Still to do (owner)
 
-1. `.claude/settings.json` from IMPLEMENTATION.md Appendix B (Claude Code's permission
+1. The Conclusions and Recommendations blocks at the end of [REPORT.md](REPORT.md)
+   (user-owned).
+2. The demo video: `uv run ragsec demo exfil --preset baseline`, then `--preset all` to
+   show the stack stopping it (§15.4).
+3. The resume bullet.
+4. `.claude/settings.json` from IMPLEMENTATION.md Appendix B (Claude Code's permission
    rules for this project), or ask Claude Code to create it.
-2. Optional (§3): `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_LOADED_MODELS=1` as user
+5. Optional (§3): `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_LOADED_MODELS=1` as user
    environment variables, then restart Ollama.
+6. Decide whether to run the extensions: the load test (Run 5) and the training-data
+   poisoning experiment (Run 6).
 
 No Hugging Face token is needed any more. Prompt Guard 2 access was denied, so the
 ungated fallback classifier is the one in use.
@@ -124,13 +207,15 @@ Node 22.22+; Ollama with `qwen3:8b` and `llama3.1:8b` pulled; an 8 GB NVIDIA GPU
 ```bash
 uv sync --locked                    # app environment (CPU PyTorch)
 uv run ragsec doctor --download     # Run 0: checks, model downloads, Chromium, pins
-uv run ragsec corpus render         # templates -> data/corpus
-uv run ragsec ingest                # Chroma index (add --d6 once the classifier is downloaded)
-uv run ragsec benign freeze         # hash the benign set before its first run (§9)
+uv run ragsec corpus render         # templates -> data/corpus (byte-identical to the committed copy)
+uv run ragsec ingest                # Chroma index
+uv run ragsec benign validate       # the benign set is already frozen in FREEZE.md
 uv run ragsec eval --suite benign --preset baseline --model A --run-id benign-A-baseline
 uv run ragsec eval --suite benign --preset baseline --model B --run-id benign-B-baseline
 uv run ragsec report                # tables, charts, REPORT.md generated blocks
 ```
+
+`--trials 1` on any `eval` gives a quick smoke run.
 
 Run 3, in order (each `eval` resumes by run id; the presets are in `config/defenses/`):
 
@@ -139,9 +224,22 @@ uv run ragsec ingest --d6                                                     # 
 uv run ragsec eval --suite benign --preset d5 --model A --run-id run3-tune-d5-A  # also d4, d6
 uv run ragsec tune                                                            # §7.3: reports only
 uv run ragsec eval --suite dev,benign --preset all --model A --run-id run3-all-A # one per preset
-uv run ragsec eval --suite heldout --preset all --model A --run-id run3-heldout-all-A
+uv run ragsec eval --suite heldout --preset all --model A --run-id run3-heldout-all-A  # once only
 uv run ragsec supplychain                                                     # S1–S4 on copies
 uv run ragsec report --scoring core                                           # needs PREDICTIONS.md
+```
+
+Run 4, the adaptive round (each step refuses to repeat; the pool and attempt log are
+committed, so these re-create nothing that exists):
+
+```bash
+uv run ragsec adaptive promptfoo            # owner: promptfoo generation (asks for an account email)
+uv run ragsec adaptive convert              # -> attacks/adaptive/promptfoo/pool.yaml
+uv run ragsec adaptive pick --round 1       # -> attacks/adaptive/dev/promptfoo-r1.yaml
+uv run ragsec adaptive attempt attacks/adaptive/dev/promptfoo-r1.yaml   # Model A, all, 3 trials, logged
+uv run ragsec adaptive status               # attempts used of 10 per category
+uv run ragsec adaptive finalize             # -> attacks/adaptive/final.yaml (3 per category)
+uv run ragsec eval --suite adaptive --preset all --model A --run-id run4-adaptive-all-A   # and model B
 ```
 
 Try the app by hand: `uv run ragsec serve --preset baseline`, then open
@@ -161,6 +259,7 @@ http://127.0.0.1:8000 (or `uv run ragsec ask "What are the helpdesk hours?"`).
 | `ragsec attacks generate [--convert] [--variants]` | promptfoo conversion and Claude variants into `attacks/candidates/` |
 | `ragsec attacks validate` / `select` / `split` / `freeze` | Validate cases, choose 15 per category by variety, preview the split, freeze (Run 2) |
 | `ragsec tune [--model A]` | §7.3 analysis of the benign tuning runs (d4, d5, d6); reports only, never edits config |
+| `ragsec adaptive promptfoo` / `convert` / `pick` / `attempt` / `status` / `finalize` | Adaptive round (§8.7): generate, convert, draw, run and log within the budget, choose the final set |
 | `ragsec supplychain` | Verification checks S1–S4 on copies |
 | `ragsec audit sample` / `score` | Check audit (§10.5) |
 | `ragsec report [--scoring core]` | Summary tables, charts, predictions scoring |
@@ -176,10 +275,12 @@ Tests: `uv run pytest`, `uv run ruff check .`, `uv run mypy`.
 ```
 config/            app.yaml, harness.yaml, dlp.yaml, pins.yaml, defenses/ (16 presets)
 data/              facts.yaml (source of truth), canaries.yaml, directory.yaml, corpus_src/ -> corpus/, benign/
-attacks/           seeds/ (USER-OWNED), candidates/, docs/, frozen/, adaptive/ (user/ is USER-OWNED), demo/
+attacks/           seeds/ (USER-OWNED), candidates/, docs/, frozen/, demo/,
+                   adaptive/: promptfoo/ (config, pool), dev/ (attempts), attempts.jsonl, final.yaml;
+                   adaptive/user/ is USER-OWNED
 src/ragsec/app/    API, modes, pipeline, retrieval, prompts, tool, model client, cache, integrity, render
 src/ragsec/defenses/ d1_role_filter … d7_limits
-src/ragsec/harness/  runner, checks, browser, stats, metrics, report, attacks, audit, supplychain, doctor, load, poison
+src/ragsec/harness/  runner, checks, browser, stats, metrics, report, attacks, adaptive, audit, supplychain, doctor, load, poison
 ui/                chat UI, render page, shared renderer, vendored marked.js
 tests/             pytest suite (mocked LLM and classifier) + captured Ollama fixtures
 train/             poisoning extension (separate CUDA environment)

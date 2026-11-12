@@ -37,3 +37,8 @@ train/.venv/
 train/adapters/
 train/outputs/
 train/hf/
+
+# Run 4's raw promptfoo output: its header names the account that ran it, and it keeps the
+# tests conversion drops under rule 9. The converted, filtered pool is committed instead.
+# (Run 2's raw file is committed, with its header redacted.)
+attacks/adaptive/promptfoo/redteam_generated.yaml
